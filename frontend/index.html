@@ -103,7 +103,7 @@
         return;
       }
 
-      fetch(`${BACKEND_URL}/data/${sheet}`)
+      fetch(`${BACKEND_URL}/search?school_code=${code}`)
         .then(res => res.json())
         .then(data => {
           // simple client-side filter by code
