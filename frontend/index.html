@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>State Data App</title>
+
+  <style>
+    body { font-family: Arial; }
+    .tabs button { padding: 10px; margin-right: 10px; }
+    .tab { display: none; }
+    .tab.active { display: block; }
+  </style>
+</head>
+
+<body>
+
+<h2>State Data Management</h2>
+
+<div class="tabs">
+  <button onclick="openTab('search')">Search</button>
+  <button onclick="openTab('edit')">Edit Data</button>
+</div>
+
+<div id="search" class="tab active">
+  <h3>Search State Data</h3>
+  <input id="searchState" placeholder="State code (MH)">
+  <button onclick="search()">Search</button>
+  <pre id="result"></pre>
+</div>
+
+<div id="edit" class="tab">
+  <h3>Upload / Replace Data</h3>
+  <input id="editState" placeholder="State code (MH)">
+  <br><br>
+  <input type="file" id="file">
+  <br><br>
+  <button onclick="upload()">Upload</button>
+</div>
+
+<script>
+const BACKEND_URL = "https://YOUR_RENDER_BACKEND_URL";
+
+function openTab(id) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+}
+
+function search() {
+  fetch(`${BACKEND_URL}/data/${searchState.value}`)
+    .then(r => r.json())
+    .then(d => result.innerText = JSON.stringify(d, null, 2));
+}
+
+function upload() {
+  const fd = new FormData();
+  fd.append("file", file.files[0]);
+
+  fetch(`${BACKEND_URL}/upload/${editState.value}`, {
+    method: "POST",
+    body: fd
+  })
+  .then(r => r.json())
+  .then(d => alert(d.message));
+}
+</script>
+
+</body>
+</html>
