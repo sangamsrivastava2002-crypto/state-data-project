@@ -1,67 +1,127 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>State Data App</title>
+  <meta charset="UTF-8">
+  <title>Search Data from the Sheets</title>
 
   <style>
-    body { font-family: Arial; }
-    .tabs button { padding: 10px; margin-right: 10px; }
-    .tab { display: none; }
-    .tab.active { display: block; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #ffffff;
+      margin: 40px;
+    }
+
+    h2 {
+      font-size: 24px;
+      margin-bottom: 20px;
+    }
+
+    .container {
+      max-width: 900px;
+    }
+
+    label {
+      font-weight: bold;
+      display: block;
+      margin-top: 20px;
+      margin-bottom: 8px;
+    }
+
+    select, input {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    button {
+      margin-top: 25px;
+      width: 100%;
+      padding: 14px;
+      background-color: #4CAF50;
+      color: white;
+      font-size: 18px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #45a049;
+    }
+
+    pre {
+      margin-top: 30px;
+      background: #f7f7f7;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
   </style>
 </head>
 
 <body>
 
-<h2>State Data Management</h2>
+  <div class="container">
+    <h2>🔍 Search Data from the Sheets</h2>
 
-<div class="tabs">
-  <button onclick="openTab('search')">Search</button>
-  <button onclick="openTab('edit')">Edit Data</button>
-</div>
+    <!-- Sheet / State Selection -->
+    <label for="sheet">Select Sheet:</label>
+    <select id="sheet">
+      <option value="">All Sheets</option>
+      <option value="MH">MH</option>
+      <option value="GJ">GJ</option>
+      <option value="Assam">Assam</option>
+      <!-- you can add more states later -->
+    </select>
 
-<div id="search" class="tab active">
-  <h3>Search State Data</h3>
-  <input id="searchState" placeholder="State code (MH)">
-  <button onclick="search()">Search</button>
-  <pre id="result"></pre>
-</div>
+    <!-- Code Search -->
+    <label for="code">Search By Teacher/Student code:</label>
+    <input
+      type="text"
+      id="code"
+      placeholder="Enter the Teacher or School code"
+    >
 
-<div id="edit" class="tab">
-  <h3>Upload / Replace Data</h3>
-  <input id="editState" placeholder="State code (MH)">
-  <br><br>
-  <input type="file" id="file">
-  <br><br>
-  <button onclick="upload()">Upload</button>
-</div>
+    <!-- Search Button -->
+    <button onclick="searchData()">Search</button>
 
-<script>
-const BACKEND_URL = "https://state-data-project-1.onrender.com";
+    <!-- Result -->
+    <pre id="result"></pre>
+  </div>
 
-function openTab(id) {
-  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-  document.getElementById(id).classList.add("active");
-}
+  <script>
+    const BACKEND_URL = "https://state-data-project-1.onrender.com/";
 
-function search() {
-  fetch(`${BACKEND_URL}/data/${searchState.value}`)
-    .then(r => r.json())
-    .then(d => result.innerText = JSON.stringify(d, null, 2));
-}
+    function searchData() {
+      const sheet = document.getElementById("sheet").value;
+      const code = document.getElementById("code").value;
 
-function upload() {
-  const fd = new FormData();
-  fd.append("file", file.files[0]);
+      if (!sheet) {
+        alert("Please select a sheet/state");
+        return;
+      }
 
-  fetch(`${BACKEND_URL}/upload/${editState.value}`, {
-    method: "POST",
-    body: fd
-  })
-  .then(r => r.json())
-  .then(d => alert(d.message));
-}
-</script>
+      fetch(`${BACKEND_URL}/data/${sheet}`)
+        .then(res => res.json())
+        .then(data => {
+          // simple client-side filter by code
+          const filtered = code
+            ? data.filter(row =>
+                JSON.stringify(row).toLowerCase().includes(code.toLowerCase())
+              )
+            : data;
+
+          document.getElementById("result").innerText =
+            JSON.stringify(filtered, null, 2);
+        })
+        .catch(() => {
+          document.getElementById("result").innerText =
+            "Error fetching data";
+        });
+    }
+  </script>
 
 </body>
 </html>
