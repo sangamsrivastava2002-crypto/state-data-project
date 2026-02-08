@@ -4,11 +4,15 @@ import psycopg2
 import pandas as pd
 import os
 
+# ------------------ DB CONNECTION ------------------
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 conn = psycopg2.connect(DATABASE_URL)
+
+# ------------------ APP SETUP ------------------
 
 app = FastAPI()
 
@@ -19,58 +23,111 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ------------------ HEALTH CHECK ------------------
+
 @app.get("/")
 def health():
     return {"status": "backend running"}
 
+# ------------------ SEARCH API (FIELD USERS) ------------------
+
 @app.get("/data/{state}")
 def get_state_data(state: str):
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT district, value1, value2, remarks
-        FROM state_data
-        WHERE state = %s
-        ORDER BY district
-        """,
-        (state.upper(),)
-    )
-    return cur.fetchall()
-
-@app.post("/upload/{state}")
-def upload_state_data(state: str, file: UploadFile = File(...)):
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV allowed")
-
-    df = pd.read_csv(file.file, encoding="latin1")
-
-    required = {"district", "value1", "value2", "remarks"}
-    if not required.issubset(df.columns):
-        raise HTTPException(
-            status_code=400,
-            detail="CSV must have district, value1, value2, remarks"
-        )
-
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM state_data WHERE state = %s",
-        (state.upper(),)
-    )
-
-    for _, row in df.iterrows():
+    try:
+        cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO state_data (state, district, value1, value2, remarks)
-            VALUES (%s, %s, %s, %s, %s)
+            SELECT
+                school_code,
+                school_name,
+                employee_name,
+                employee_code,
+                designation
+            FROM state_data
+            WHERE state = %s
+            ORDER BY school_name, employee_name
             """,
-            (
-                state.upper(),
-                row["district"],
-                int(row["value1"]),
-                int(row["value2"]),
-                row["remarks"]
-            )
+            (state.upper(),)
         )
+        rows = cur.fetchall()
+        return rows
 
-    conn.commit()
-    return {"message": f"{state.upper()} data replaced"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ------------------ BULK CSV UPLOAD (OFFICE USERS) ------------------
+
+@app.post("/upload-csv")
+def upload_csv(files: list[UploadFile] = File(...)):
+    try:
+        cur = conn.cursor()
+
+        for file in files:
+            if not file.filename.lower().endswith(".csv"):
+                continue
+
+            state = file.filename.replace(".csv", "").upper()
+
+            # Read CSV safely (Excel / Windows friendly)
+            df = pd.read_csv(file.file, encoding="latin1")
+
+            # Normalize column names
+            df.columns = [
+                c.strip().lower().replace(" ", "_")
+                for c in df.columns
+            ]
+
+            required_columns = {
+                "school_code",
+                "school_name",
+                "employee_name",
+                "employee_code",
+                "designation"
+            }
+
+            if not required_columns.issubset(df.columns):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{file.filename} has invalid columns: {df.columns.tolist()}"
+                )
+
+            # Delete old data for this state
+            cur.execute(
+                "DELETE FROM state_data WHERE state = %s",
+                (state,)
+            )
+
+            # Insert new data
+            for _, row in df.iterrows():
+                cur.execute(
+                    """
+                    INSERT INTO state_data (
+                        state,
+                        school_code,
+                        school_name,
+                        employee_name,
+                        employee_code,
+                        designation
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        state,
+                        str(row["school_code"]),
+                        str(row["school_name"]),
+                        str(row["employee_name"]),
+                        str(row["employee_code"]),
+                        str(row["designation"])
+                    )
+                )
+
+        conn.commit()
+        return {"message": "All CSV files uploaded successfully"}
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
