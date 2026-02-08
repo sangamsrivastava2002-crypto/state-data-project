@@ -69,11 +69,7 @@
     <!-- Sheet / State Selection -->
     <label for="sheet">Select Sheet:</label>
     <select id="sheet">
-      <option value="">All Sheets</option>
-      <option value="MH">MH</option>
-      <option value="GJ">GJ</option>
-      <option value="Assam">Assam</option>
-      <!-- you can add more states later -->
+      <option value="">Select Sheets</option>
     </select>
 
     <!-- Code Search -->
@@ -90,6 +86,52 @@
     <!-- Result -->
     <pre id="result"></pre>
   </div>
+
+  <script>
+    const BACKEND_URL = "https://state-data-project-1.onrender.com";
+
+    // Load states automatically
+    window.onload = function () {
+      fetch(`${BACKEND_URL}/states`)
+        .then(res => res.json())
+        .then(states => {
+          const select = document.getElementById("sheet");
+
+          states.forEach(state => {
+            const option = document.createElement("option");
+            option.value = state;
+            option.textContent = state;
+            select.appendChild(option);
+          });
+        })
+        .catch(() => {
+          alert("Failed to load states");
+        });
+    };
+
+    function searchData() {
+      const state = document.getElementById("sheet").value;
+      const schoolCode = document.getElementById("code").value;
+
+      if (!state || !schoolCode) {
+        alert("Select state and enter school code");
+        return;
+      }
+
+      fetch(
+        `${BACKEND_URL}/search?state=${state}&school_code=${schoolCode}`
+      )
+        .then(res => res.json())
+        .then(data => {
+          document.getElementById("result").innerText =
+            JSON.stringify(data, null, 2);
+        })
+        .catch(() => {
+          document.getElementById("result").innerText =
+            "Error fetching data";
+        });
+    }
+  </script>
 
   <script>
     const BACKEND_URL = "https://state-data-project-1.onrender.com";
