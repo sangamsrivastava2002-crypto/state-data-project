@@ -33,6 +33,33 @@ def health():
 
 # ------------------ SEARCH API ------------------
 
+
+@app.get("/states")
+def get_states():
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT DISTINCT state
+            FROM state_data
+            ORDER BY state
+            """
+        )
+
+        rows = cur.fetchall()
+        return [row[0] for row in rows]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/search")
 def search_by_state_and_school(
     state: str,
