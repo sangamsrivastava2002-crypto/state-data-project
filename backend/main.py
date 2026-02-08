@@ -33,8 +33,12 @@ def health():
 
 # ------------------ SEARCH API ------------------
 
-@app.get("/data/{state}")
-def get_state_data(state: str):
+@app.get("/search")
+def search_by_state_and_school(
+    state: str,
+    school_code: str
+):
+    conn = None
     try:
         conn = get_db_conn()
         cur = conn.cursor()
@@ -49,9 +53,10 @@ def get_state_data(state: str):
                 designation
             FROM state_data
             WHERE state = %s
-            ORDER BY school_name, employee_name
+              AND school_code = %s
+            ORDER BY employee_name
             """,
-            (state.upper(),)
+            (state.upper(), school_code)
         )
 
         rows = cur.fetchall()
@@ -63,6 +68,7 @@ def get_state_data(state: str):
     finally:
         if conn:
             conn.close()
+
 
 # ------------------ BULK CSV UPLOAD ------------------
 
