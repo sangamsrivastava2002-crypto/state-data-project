@@ -42,7 +42,7 @@ def upload_state_data(state: str, file: UploadFile = File(...)):
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV allowed")
 
-    df = pd.read_csv(file.file)
+    df = pd.read_csv(file.file, encoding="latin1")
 
     required = {"district", "value1", "value2", "remarks"}
     if not required.issubset(df.columns):
