@@ -1,12 +1,21 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
-import pandas as pd
 import os
+import tempfile
+import logging
+import time
+
+# ------------------ CONFIG ------------------
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ------------------ APP ------------------
 
 app = FastAPI()
 
@@ -31,8 +40,7 @@ def get_db_conn():
 def health():
     return {"status": "backend running"}
 
-# ------------------ SEARCH API ------------------
-
+# ------------------ STATES ------------------
 
 @app.get("/states")
 def get_states():
@@ -59,12 +67,10 @@ def get_states():
         if conn:
             conn.close()
 
+# ------------------ SEARCH ------------------
 
 @app.get("/search")
-def search_by_state_and_school(
-    state: str,
-    school_code: str
-):
+def search_by_state_and_school(state: str, school_code: str):
     conn = None
     try:
         conn = get_db_conn()
@@ -86,8 +92,7 @@ def search_by_state_and_school(
             (state.upper(), school_code)
         )
 
-        rows = cur.fetchall()
-        return rows
+        return cur.fetchall()
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -96,12 +101,12 @@ def search_by_state_and_school(
         if conn:
             conn.close()
 
-
-# ------------------ BULK CSV UPLOAD ------------------
+# ------------------ CSV UPLOAD (FINAL FIX) ------------------
 
 @app.post("/upload-csv")
-def upload_csv(files: list[UploadFile] = File(...)):
+async def upload_csv(files: list[UploadFile] = File(...)):
     conn = None
+
     try:
         conn = get_db_conn()
         cur = conn.cursor()
@@ -111,70 +116,60 @@ def upload_csv(files: list[UploadFile] = File(...)):
                 continue
 
             state = file.filename.replace(".csv", "").upper()
+            logger.info(f"Starting upload for state: {state}")
+            start_time = time.time()
 
-            df = pd.read_csv(file.file, encoding="latin1")
+            # Save file to temp
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                contents = await file.read()
+                tmp.write(contents)
+                tmp_path = tmp.name
 
-            # Normalize headers
-            df.columns = [
-                c.strip().lower().replace(" ", "_")
-                for c in df.columns
-            ]
-
-            required = {
-                "school_code",
-                "school_name",
-                "employee_name",
-                "employee_code",
-                "designation"
-            }
-
-            if not required.issubset(df.columns):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{file.filename} has invalid columns: {df.columns.tolist()}"
-                )
-
-            # Replace state data
-            cur.execute(
-                "DELETE FROM state_data WHERE state = %s",
-                (state,)
-            )
-
-            for _, row in df.iterrows():
+            try:
+                # Replace data atomically per state
                 cur.execute(
-                    """
-                    INSERT INTO state_data (
-                        state,
-                        school_code,
-                        school_name,
-                        employee_name,
-                        employee_code,
-                        designation
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        state,
-                        str(row["school_code"]),
-                        str(row["school_name"]),
-                        str(row["employee_name"]),
-                        str(row["employee_code"]),
-                        str(row["designation"])
-                    )
+                    "DELETE FROM state_data WHERE state = %s",
+                    (state,)
                 )
 
-        conn.commit()
+                with open(tmp_path, "r", encoding="latin1") as f:
+                    cur.copy_expert(
+                        """
+                        COPY state_data (
+                            school_code,
+                            school_name,
+                            employee_name,
+                            employee_code,
+                            designation
+                        )
+                        FROM STDIN
+                        WITH CSV HEADER
+                        """,
+                        f
+                    )
+
+                # Inject state value
+                cur.execute(
+                    "UPDATE state_data SET state = %s WHERE state IS NULL",
+                    (state,)
+                )
+
+                conn.commit()
+
+                logger.info(
+                    f"{state} upload completed in "
+                    f"{time.time() - start_time:.2f}s"
+                )
+
+            except Exception as e:
+                conn.rollback()
+                logger.exception(f"Upload failed for {state}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+            finally:
+                os.remove(tmp_path)
+
         return {"message": "All CSV files uploaded successfully"}
-
-    except HTTPException:
-        if conn:
-            conn.rollback()
-        raise
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
 
     finally:
         if conn:
