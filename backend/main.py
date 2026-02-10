@@ -36,8 +36,9 @@ def get_db_conn():
 
 def safe_table_name(filename: str) -> str:
     """
-    Convert filename to safe table name.
-    example: 'Assam Final-2024.csv' -> 'data_assam_final_2024'
+    Convert filename to safe SQL table name
+    Example:
+      'MH Final Data 2024.csv' -> 'data_mh_final_data_2024'
     """
     name = filename.lower().replace(".csv", "")
     name = re.sub(r"[^a-z0-9_]+", "_", name)
@@ -100,7 +101,7 @@ def search(table: str, school_code: str):
         if conn:
             conn.close()
 
-# ---------------- CSV UPLOAD ----------------
+# ---------------- CSV UPLOAD (FINAL) ----------------
 
 @app.post("/upload-csv")
 async def upload_csv(files: list[UploadFile] = File(...)):
@@ -113,7 +114,7 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                 continue
 
             table = safe_table_name(file.filename)
-            logger.info(f"Uploading → {table}")
+            logger.info(f"Uploading CSV → {table}")
             start = time.time()
 
             # Save CSV temporarily
@@ -122,7 +123,7 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                 tmp_path = tmp.name
 
             try:
-                # Create table if not exists
+                # Create table (designation DEFAULT '' is critical)
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {table} (
                         id BIGSERIAL PRIMARY KEY,
@@ -130,15 +131,15 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                         school_name TEXT,
                         employee_name TEXT,
                         employee_code VARCHAR(50),
-                        designation TEXT,
+                        designation TEXT DEFAULT '',
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
 
-                # Clear old data (replace upload)
+                # Replace old data
                 cur.execute(f"TRUNCATE TABLE {table}")
 
-                # COPY data
+                # COPY data (encoding-safe)
                 with open(tmp_path, "r", encoding="latin1") as f:
                     cur.copy_expert(
                         f"""
@@ -150,7 +151,14 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                             designation
                         )
                         FROM STDIN
-                        WITH CSV HEADER
+                        WITH (
+                            FORMAT CSV,
+                            HEADER,
+                            DELIMITER ',',
+                            QUOTE '"',
+                            ESCAPE '"',
+                            ENCODING 'LATIN1'
+                        )
                         """,
                         f
                     )
@@ -163,7 +171,7 @@ async def upload_csv(files: list[UploadFile] = File(...)):
 
                 conn.commit()
                 logger.info(
-                    f"{table} uploaded in {time.time() - start:.2f}s"
+                    f"{table} uploaded successfully in {time.time() - start:.2f}s"
                 )
 
             except Exception as e:
