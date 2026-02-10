@@ -103,18 +103,21 @@
     const BACKEND_URL = "https://state-data-project-1.onrender.com";
 
     // Load tables on page load
-    window.onload = function () {
+    window.onload = () => {
       fetch(`${BACKEND_URL}/tables`)
         .then(res => res.json())
         .then(tables => {
           const select = document.getElementById("table");
-          
-          tables.forEach(table => {
+
+          tables.forEach(fullTableName => {
             const option = document.createElement("option");
-            // REMOVE data_ prefix before sending to backend
-            option.value = table.replace(/^data_/, "");
-            // Show full name to user
-            option.textContent = table;
+
+            // Backend expects RAW name (without data_)
+            option.value = fullTableName.replace(/^data_/, "");
+
+            // User sees full table name
+            option.textContent = fullTableName;
+
             select.appendChild(option);
           });
         })
@@ -124,17 +127,19 @@
     };
 
     function searchData() {
-      const table = document.getElementById("table").value;
-      const schoolCode = document.getElementById("code").value;
+      const table = document.getElementById("table").value.trim();
+      const schoolCode = document.getElementById("code").value.trim();
 
       if (!table || !schoolCode) {
         alert("Select dataset and enter school code");
         return;
       }
 
-      fetch(
-        `${BACKEND_URL}/search?table=${table}&school_code=${schoolCode}`
-      )
+      // ALWAYS encode query params
+      const url =
+        `${BACKEND_URL}/search?table=${encodeURIComponent(table)}&school_code=${encodeURIComponent(schoolCode)}`;
+
+      fetch(url)
         .then(res => res.json())
         .then(data => {
           document.getElementById("result").innerText =
