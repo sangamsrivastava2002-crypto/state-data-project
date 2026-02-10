@@ -3,10 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 import os
 import tempfile
+import re
 import logging
 import time
 
-# ------------------ CONFIG ------------------
+# ---------------- CONFIG ----------------
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -15,7 +16,7 @@ if not DATABASE_URL:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ------------------ APP ------------------
+# ---------------- APP ----------------
 
 app = FastAPI()
 
@@ -26,72 +27,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------ DB HELPER ------------------
+# ---------------- DB ----------------
 
 def get_db_conn():
-    return psycopg2.connect(
-        DATABASE_URL,
-        sslmode="require"
-    )
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
-# ------------------ HEALTH ------------------
+# ---------------- UTILS ----------------
+
+def safe_table_name(filename: str) -> str:
+    """
+    Convert filename to safe table name.
+    example: 'Assam Final-2024.csv' -> 'data_assam_final_2024'
+    """
+    name = filename.lower().replace(".csv", "")
+    name = re.sub(r"[^a-z0-9_]+", "_", name)
+    return f"data_{name}"
+
+# ---------------- HEALTH ----------------
 
 @app.get("/")
 def health():
     return {"status": "backend running"}
 
-# ------------------ STATES ------------------
+# ---------------- LIST TABLES ----------------
 
-@app.get("/states")
-def get_states():
-    conn = None
+@app.get("/tables")
+def list_tables():
+    conn = get_db_conn()
     try:
-        conn = get_db_conn()
         cur = conn.cursor()
-
-        cur.execute(
-            """
-            SELECT DISTINCT state
-            FROM state_data
-            ORDER BY state
-            """
-        )
-
-        rows = cur.fetchall()
-        return [row[0] for row in rows]
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+        cur.execute("""
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = 'public'
+              AND tablename LIKE 'data_%'
+            ORDER BY tablename
+        """)
+        return [row[0] for row in cur.fetchall()]
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
-# ------------------ SEARCH ------------------
+# ---------------- SEARCH ----------------
 
 @app.get("/search")
-def search_by_state_and_school(state: str, school_code: str):
+def search(table: str, school_code: str):
+    table = safe_table_name(table)
+
     conn = None
     try:
         conn = get_db_conn()
         cur = conn.cursor()
 
-        cur.execute(
-            """
+        query = f"""
             SELECT
                 school_code,
                 school_name,
                 employee_name,
                 employee_code,
                 designation
-            FROM state_data
-            WHERE state = %s
-              AND school_code = %s
+            FROM {table}
+            WHERE school_code = %s
             ORDER BY employee_name
-            """,
-            (state.upper(), school_code)
-        )
+        """
 
+        cur.execute(query, (school_code,))
         return cur.fetchall()
 
     except Exception as e:
@@ -101,41 +100,49 @@ def search_by_state_and_school(state: str, school_code: str):
         if conn:
             conn.close()
 
-# ------------------ CSV UPLOAD (FINAL FIX) ------------------
+# ---------------- CSV UPLOAD ----------------
 
 @app.post("/upload-csv")
 async def upload_csv(files: list[UploadFile] = File(...)):
-    conn = None
+    conn = get_db_conn()
+    cur = conn.cursor()
 
     try:
-        conn = get_db_conn()
-        cur = conn.cursor()
-
         for file in files:
             if not file.filename.lower().endswith(".csv"):
                 continue
 
-            state = file.filename.replace(".csv", "").upper()
-            logger.info(f"Starting upload for state: {state}")
-            start_time = time.time()
+            table = safe_table_name(file.filename)
+            logger.info(f"Uploading → {table}")
+            start = time.time()
 
-            # Save file to temp
+            # Save CSV temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-                contents = await file.read()
-                tmp.write(contents)
+                tmp.write(await file.read())
                 tmp_path = tmp.name
 
             try:
-                # Replace data atomically per state
-                cur.execute(
-                    "DELETE FROM state_data WHERE state = %s",
-                    (state,)
-                )
+                # Create table if not exists
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        id BIGSERIAL PRIMARY KEY,
+                        school_code VARCHAR(50),
+                        school_name TEXT,
+                        employee_name TEXT,
+                        employee_code VARCHAR(50),
+                        designation TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
 
+                # Clear old data (replace upload)
+                cur.execute(f"TRUNCATE TABLE {table}")
+
+                # COPY data
                 with open(tmp_path, "r", encoding="latin1") as f:
                     cur.copy_expert(
-                        """
-                        COPY state_data (
+                        f"""
+                        COPY {table} (
                             school_code,
                             school_name,
                             employee_name,
@@ -148,22 +155,20 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                         f
                     )
 
-                # Inject state value
-                cur.execute(
-                    "UPDATE state_data SET state = %s WHERE state IS NULL",
-                    (state,)
-                )
+                # Index for fast search
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{table}_school
+                    ON {table} (school_code);
+                """)
 
                 conn.commit()
-
                 logger.info(
-                    f"{state} upload completed in "
-                    f"{time.time() - start_time:.2f}s"
+                    f"{table} uploaded in {time.time() - start:.2f}s"
                 )
 
             except Exception as e:
                 conn.rollback()
-                logger.exception(f"Upload failed for {state}")
+                logger.exception(f"Upload failed for {table}")
                 raise HTTPException(status_code=500, detail=str(e))
 
             finally:
@@ -172,5 +177,4 @@ async def upload_csv(files: list[UploadFile] = File(...)):
         return {"message": "All CSV files uploaded successfully"}
 
     finally:
-        if conn:
-            conn.close()
+        conn.close()
