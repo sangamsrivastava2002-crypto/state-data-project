@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import psycopg2
 import os
 import tempfile
@@ -34,13 +35,11 @@ def get_db_conn():
 
 # ---------------- UTILS ----------------
 
-def safe_table_name(filename: str) -> str:
+def safe_table_name(name: str) -> str:
     """
-    Convert filename to safe SQL table name
-    Example:
-      'MH Final Data 2024.csv' -> 'data_mh_final_data_2024'
+    Convert filename or table hint to safe SQL table name
     """
-    name = filename.lower().replace(".csv", "")
+    name = name.lower().replace(".csv", "")
     name = re.sub(r"[^a-z0-9_]+", "_", name)
     return f"data_{name}"
 
@@ -50,7 +49,7 @@ def safe_table_name(filename: str) -> str:
 def health():
     return {"status": "backend running"}
 
-# ---------------- LIST TABLES ----------------
+# ---------------- LIST DATA TABLES (SEARCH UI) ----------------
 
 @app.get("/tables")
 def list_tables():
@@ -64,7 +63,7 @@ def list_tables():
               AND tablename LIKE 'data_%'
             ORDER BY tablename
         """)
-        return [row[0] for row in cur.fetchall()]
+        return [r[0] for r in cur.fetchall()]
     finally:
         conn.close()
 
@@ -74,12 +73,10 @@ def list_tables():
 def search(table: str, school_code: str):
     table = safe_table_name(table)
 
-    conn = None
+    conn = get_db_conn()
     try:
-        conn = get_db_conn()
         cur = conn.cursor()
-
-        query = f"""
+        cur.execute(f"""
             SELECT
                 school_code,
                 school_name,
@@ -89,19 +86,14 @@ def search(table: str, school_code: str):
             FROM {table}
             WHERE school_code = %s
             ORDER BY employee_name
-        """
-
-        cur.execute(query, (school_code,))
+        """, (school_code,))
         return cur.fetchall()
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
-# ---------------- CSV UPLOAD (FINAL) ----------------
+# ---------------- CSV UPLOAD (ADD / REPLACE) ----------------
 
 @app.post("/upload-csv")
 async def upload_csv(files: list[UploadFile] = File(...)):
@@ -117,13 +109,12 @@ async def upload_csv(files: list[UploadFile] = File(...)):
             logger.info(f"Uploading CSV → {table}")
             start = time.time()
 
-            # Save CSV temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
                 tmp.write(await file.read())
                 tmp_path = tmp.name
 
             try:
-                # Create table (designation DEFAULT '' is critical)
+                # Create table if not exists
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {table} (
                         id BIGSERIAL PRIMARY KEY,
@@ -139,10 +130,9 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                 # Replace old data
                 cur.execute(f"TRUNCATE TABLE {table}")
 
-                # COPY data (encoding-safe)
+                # COPY CSV
                 with open(tmp_path, "r", encoding="latin1") as f:
-                    cur.copy_expert(
-                        f"""
+                    cur.copy_expert(f"""
                         COPY {table} (
                             school_code,
                             school_name,
@@ -156,22 +146,39 @@ async def upload_csv(files: list[UploadFile] = File(...)):
                             HEADER,
                             DELIMITER ',',
                             QUOTE '"',
-                            ESCAPE '"',
-                            ENCODING 'LATIN1'
+                            ESCAPE '"'
                         )
-                        """,
-                        f
-                    )
+                    """, f)
 
-                # Index for fast search
+                # Index
                 cur.execute(f"""
                     CREATE INDEX IF NOT EXISTS idx_{table}_school
                     ON {table} (school_code);
                 """)
 
+                # Row count
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                row_count = cur.fetchone()[0]
+
+                # Register dataset (ADD or REPLACE)
+                cur.execute("""
+                    INSERT INTO dataset_registry (
+                        table_name,
+                        original_filename,
+                        row_count
+                    )
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (table_name)
+                    DO UPDATE SET
+                        original_filename = EXCLUDED.original_filename,
+                        row_count = EXCLUDED.row_count,
+                        uploaded_at = CURRENT_TIMESTAMP
+                """, (table, file.filename, row_count))
+
                 conn.commit()
                 logger.info(
-                    f"{table} uploaded successfully in {time.time() - start:.2f}s"
+                    f"{table} uploaded successfully "
+                    f"({row_count} rows, {time.time() - start:.2f}s)"
                 )
 
             except Exception as e:
@@ -187,7 +194,56 @@ async def upload_csv(files: list[UploadFile] = File(...)):
     finally:
         conn.close()
 
-# ---------------- DOWNLOAD CSV ----------------
+# ---------------- DATASET LIST (BACK OFFICE) ----------------
+
+@app.get("/datasets")
+def list_datasets():
+    conn = get_db_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                table_name,
+                original_filename,
+                row_count,
+                uploaded_at
+            FROM dataset_registry
+            ORDER BY uploaded_at DESC
+        """)
+        rows = cur.fetchall()
+
+        return [
+            {
+                "table": r[0],
+                "filename": r[1],
+                "rows": r[2],
+                "uploaded_at": r[3]
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+# ---------------- DELETE DATASET ----------------
+
+@app.delete("/datasets/{table}")
+def delete_dataset(table: str):
+    table = safe_table_name(table)
+
+    conn = get_db_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"DROP TABLE IF EXISTS {table}")
+        cur.execute(
+            "DELETE FROM dataset_registry WHERE table_name = %s",
+            (table,)
+        )
+        conn.commit()
+        return {"message": "Dataset deleted successfully"}
+    finally:
+        conn.close()
+
+# ---------------- DOWNLOAD FULL DATASET ----------------
 
 @app.get("/download/{table}")
 def download_table(table: str):
@@ -199,18 +255,27 @@ def download_table(table: str):
     cur.execute(f"""
         COPY (
             SELECT
-              school_code,
-              school_name,
-              employee_name,
-              employee_code,
-              designation
+                school_code,
+                school_name,
+                employee_name,
+                employee_code,
+                designation
             FROM {table}
         )
         TO STDOUT WITH CSV HEADER
     """)
 
     def stream():
-        for row in cur:
-            yield row
+        while True:
+            data = cur.fetchone()
+            if data is None:
+                break
+            yield data
 
-    conn.close()
+    return StreamingResponse(
+        stream(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={table}.csv"
+        }
+    )
