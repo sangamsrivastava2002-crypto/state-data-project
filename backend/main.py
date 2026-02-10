@@ -186,3 +186,31 @@ async def upload_csv(files: list[UploadFile] = File(...)):
 
     finally:
         conn.close()
+
+# ---------------- DOWNLOAD CSV ----------------
+
+@app.get("/download/{table}")
+def download_table(table: str):
+    table = safe_table_name(table)
+
+    conn = get_db_conn()
+    cur = conn.cursor()
+
+    cur.execute(f"""
+        COPY (
+            SELECT
+              school_code,
+              school_name,
+              employee_name,
+              employee_code,
+              designation
+            FROM {table}
+        )
+        TO STDOUT WITH CSV HEADER
+    """)
+
+    def stream():
+        for row in cur:
+            yield row
+
+    conn.close()
