@@ -5,19 +5,32 @@
   <title>Search Data from the Sheets</title>
 
   <style>
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       font-family: Arial, sans-serif;
       background: #ffffff;
-      margin: 40px;
+      margin: 0;
+      min-height: 100vh;
+
+      /* CENTER EVERYTHING */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 900px;
+      padding: 40px;
     }
 
     h2 {
       font-size: 24px;
-      margin-bottom: 20px;
-    }
-
-    .container {
-      max-width: 900px;
+      margin-bottom: 30px;
+      text-align: center;
     }
 
     label {
@@ -27,7 +40,8 @@
       margin-bottom: 8px;
     }
 
-    select, input {
+    select,
+    input {
       width: 100%;
       padding: 12px;
       font-size: 16px;
@@ -36,7 +50,7 @@
     }
 
     button {
-      margin-top: 25px;
+      margin-top: 30px;
       width: 100%;
       padding: 14px;
       background-color: #4CAF50;
@@ -56,7 +70,15 @@
       background: #f7f7f7;
       padding: 15px;
       border-radius: 4px;
-      overflow-x: auto;
+      max-height: 300px;
+      overflow: auto;
+      font-size: 14px;
+    }
+
+    @media (max-width: 600px) {
+      .container {
+        padding: 20px;
+      }
     }
   </style>
 </head>
@@ -66,18 +88,18 @@
   <div class="container">
     <h2>🔍 Search Data from the Sheets</h2>
 
-    <!-- Sheet / State Selection -->
-    <label for="sheet">Select Sheet:</label>
+    <!-- State Selection -->
+    <label for="sheet">Select State:</label>
     <select id="sheet">
-      <option value="">Select Sheets</option>
+      <option value="">Select State</option>
     </select>
 
     <!-- Code Search -->
-    <label for="code">Search By Teacher/Student code:</label>
+    <label for="code">Search by School Code:</label>
     <input
       type="text"
       id="code"
-      placeholder="Enter the Teacher or School code"
+      placeholder="Enter School Code"
     >
 
     <!-- Search Button -->
@@ -90,7 +112,7 @@
   <script>
     const BACKEND_URL = "https://state-data-project-1.onrender.com";
 
-    // Load states automatically
+    // Load states on page load
     window.onload = function () {
       fetch(`${BACKEND_URL}/states`)
         .then(res => res.json())
@@ -125,38 +147,6 @@
         .then(data => {
           document.getElementById("result").innerText =
             JSON.stringify(data, null, 2);
-        })
-        .catch(() => {
-          document.getElementById("result").innerText =
-            "Error fetching data";
-        });
-    }
-  </script>
-
-  <script>
-    const BACKEND_URL = "https://state-data-project-1.onrender.com";
-
-    function searchData() {
-      const sheet = document.getElementById("sheet").value;
-      const code = document.getElementById("code").value;
-
-      if (!sheet) {
-        alert("Please select a sheet/state");
-        return;
-      }
-
-      fetch(`${BACKEND_URL}/search?school_code=${code}`)
-        .then(res => res.json())
-        .then(data => {
-          // simple client-side filter by code
-          const filtered = code
-            ? data.filter(row =>
-                JSON.stringify(row).toLowerCase().includes(code.toLowerCase())
-              )
-            : data;
-
-          document.getElementById("result").innerText =
-            JSON.stringify(filtered, null, 2);
         })
         .catch(() => {
           document.getElementById("result").innerText =
