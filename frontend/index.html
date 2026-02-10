@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Search Data from the Sheets</title>
+  <title>Search Data</title>
 
   <style>
     * {
@@ -14,8 +14,6 @@
       background: #ffffff;
       margin: 0;
       min-height: 100vh;
-
-      /* CENTER EVERYTHING */
       display: flex;
       justify-content: center;
       align-items: center;
@@ -28,23 +26,21 @@
     }
 
     h2 {
-      font-size: 24px;
-      margin-bottom: 30px;
       text-align: center;
+      margin-bottom: 30px;
     }
 
     label {
       font-weight: bold;
       display: block;
       margin-top: 20px;
-      margin-bottom: 8px;
     }
 
-    select,
-    input {
+    select, input {
       width: 100%;
       padding: 12px;
       font-size: 16px;
+      margin-top: 8px;
       border: 1px solid #ccc;
       border-radius: 4px;
     }
@@ -53,16 +49,16 @@
       margin-top: 30px;
       width: 100%;
       padding: 14px;
-      background-color: #4CAF50;
-      color: white;
       font-size: 18px;
+      background: #4CAF50;
+      color: white;
       border: none;
       border-radius: 4px;
       cursor: pointer;
     }
 
     button:hover {
-      background-color: #45a049;
+      background: #45a049;
     }
 
     pre {
@@ -74,24 +70,18 @@
       overflow: auto;
       font-size: 14px;
     }
-
-    @media (max-width: 600px) {
-      .container {
-        padding: 20px;
-      }
-    }
   </style>
 </head>
 
 <body>
 
   <div class="container">
-    <h2>🔍 Search Data from the Sheets</h2>
+    <h2>🔍 Search Uploaded Data</h2>
 
-    <!-- State Selection -->
-    <label for="sheet">Select State:</label>
-    <select id="sheet">
-      <option value="">Select State</option>
+    <!-- Table Selection -->
+    <label for="table">Select Dataset:</label>
+    <select id="table">
+      <option value="">Select Dataset</option>
     </select>
 
     <!-- Code Search -->
@@ -112,36 +102,36 @@
   <script>
     const BACKEND_URL = "https://state-data-project-1.onrender.com";
 
-    // Load states on page load
+    // Load tables on page load
     window.onload = function () {
-      fetch(`${BACKEND_URL}/states`)
+      fetch(`${BACKEND_URL}/tables`)
         .then(res => res.json())
-        .then(states => {
-          const select = document.getElementById("sheet");
+        .then(tables => {
+          const select = document.getElementById("table");
 
-          states.forEach(state => {
+          tables.forEach(table => {
             const option = document.createElement("option");
-            option.value = state;
-            option.textContent = state;
+            option.value = table;
+            option.textContent = table;
             select.appendChild(option);
           });
         })
         .catch(() => {
-          alert("Failed to load states");
+          alert("Failed to load datasets");
         });
     };
 
     function searchData() {
-      const state = document.getElementById("sheet").value;
+      const table = document.getElementById("table").value;
       const schoolCode = document.getElementById("code").value;
 
-      if (!state || !schoolCode) {
-        alert("Select state and enter school code");
+      if (!table || !schoolCode) {
+        alert("Select dataset and enter school code");
         return;
       }
 
       fetch(
-        `${BACKEND_URL}/search?state=${state}&school_code=${schoolCode}`
+        `${BACKEND_URL}/search?table=${table}&school_code=${schoolCode}`
       )
         .then(res => res.json())
         .then(data => {
