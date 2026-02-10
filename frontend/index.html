@@ -108,10 +108,12 @@
         .then(res => res.json())
         .then(tables => {
           const select = document.getElementById("table");
-
+          
           tables.forEach(table => {
             const option = document.createElement("option");
-            option.value = table;
+            // REMOVE data_ prefix before sending to backend
+            option.value = table.replace(/^data_/, "");
+            // Show full name to user
             option.textContent = table;
             select.appendChild(option);
           });
