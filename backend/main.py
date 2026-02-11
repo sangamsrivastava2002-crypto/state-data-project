@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 import psycopg2
 import os
 import tempfile
@@ -277,5 +278,60 @@ def download_table(table: str):
         media_type="text/csv",
         headers={
             "Content-Disposition": f"attachment; filename={table}.csv"
+        }
+    )
+
+
+
+class DeletePayload(BaseModel):
+    table: str
+
+@app.post("/datasets/delete")
+def delete_dataset(payload: DeletePayload):
+    table = payload.table
+
+    if not table.isidentifier():
+        raise HTTPException(status_code=400, detail="Invalid table name")
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    try:
+        cur.execute(f'DROP TABLE IF EXISTS "{table}"')
+        cur.execute("DELETE FROM datasets_meta WHERE table_name = %s", (table,))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"status": "deleted"}
+
+
+
+@app.get("/download/{table}")
+def download_table(table: str):
+    if not table.isidentifier():
+        raise HTTPException(status_code=400, detail="Invalid table")
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    cur.execute(f'SELECT * FROM "{table}"')
+    rows = cur.fetchall()
+    headers = [desc[0] for desc in cur.description]
+
+    def csv_generator():
+        yield ",".join(headers) + "\n"
+        for row in rows:
+            yield ",".join(map(str, row)) + "\n"
+
+    cur.close()
+    conn.close()
+
+    return StreamingResponse(
+        csv_generator(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{table}.csv"'
         }
     )
