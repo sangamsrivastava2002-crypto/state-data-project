@@ -307,26 +307,28 @@ def delete_dataset(payload: DeletePayload):
     return {"status": "deleted"}
 
 
-
 @app.get("/download/{table}")
 def download_table(table: str):
     if not table.isidentifier():
-        raise HTTPException(status_code=400, detail="Invalid table")
+        raise HTTPException(status_code=400, detail="Invalid table name")
 
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
 
-    cur.execute(f'SELECT * FROM "{table}"')
-    rows = cur.fetchall()
-    headers = [desc[0] for desc in cur.description]
+    try:
+        cur.execute(f'SELECT * FROM "{table}"')
+        rows = cur.fetchall()
+        headers = [desc[0] for desc in cur.description]
+    except Exception:
+        raise HTTPException(status_code=404, detail="Table not found")
+    finally:
+        cur.close()
+        conn.close()
 
     def csv_generator():
         yield ",".join(headers) + "\n"
         for row in rows:
             yield ",".join(map(str, row)) + "\n"
-
-    cur.close()
-    conn.close()
 
     return StreamingResponse(
         csv_generator(),
