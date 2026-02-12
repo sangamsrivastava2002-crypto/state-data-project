@@ -30,6 +30,16 @@ app.add_middleware(
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
+# ================= CSV SAFE OPEN =================
+
+def open_csv_safely(path: str):
+    try:
+        print("📄 CSV opened as utf-8")
+        return open(path, "r", encoding="utf-8-sig", newline="")
+    except UnicodeDecodeError:
+        print("📄 CSV opened as latin1")
+        return open(path, "r", encoding="latin1", newline="")
+
 # ================= SCHEMA DEFINITIONS =================
 
 TEACHER_COLUMNS = [
@@ -89,27 +99,26 @@ async def upload_csv(file: UploadFile = File(...)):
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    # ===== METHOD 1: DETECT BAD ROWS =====
-    with open(tmp_path, "r", encoding="utf-8-sig", newline="") as f:
+    # ===== METHOD 1: FIND BAD ROWS =====
+    with open_csv_safely(tmp_path) as f:
         reader = csv.reader(f)
         headers = next(reader)
         expected_cols = len(headers)
 
         for i, row in enumerate(reader, start=2):
             if len(row) != expected_cols:
-                print("❌ CSV COLUMN MISMATCH DETECTED")
-                print("Row number:", i)
-                print("Expected columns:", expected_cols)
-                print("Actual columns:", len(row))
-                print("Row content:", row)
+                print("❌ CSV COLUMN MISMATCH")
+                print("Row:", i)
+                print("Expected:", expected_cols)
+                print("Actual:", len(row))
+                print("Data:", row)
                 raise HTTPException(
                     status_code=400,
-                    detail=f"CSV malformed at row {i}"
+                    detail=f"Malformed CSV at row {i}"
                 )
-    # ====================================
 
-    # --- Read headers for schema detection ---
-    with open(tmp_path, newline="", encoding="utf-8-sig") as f:
+    # ===== READ HEADERS FOR SCHEMA =====
+    with open_csv_safely(tmp_path) as f:
         reader = csv.reader(f)
         headers = [normalize(h) for h in next(reader)]
 
@@ -132,7 +141,6 @@ async def upload_csv(file: UploadFile = File(...)):
                 )
             ''')
             copy_cols = TEACHER_COLUMNS
-
         else:
             cur.execute(f'''
                 CREATE TABLE "{table}" (
@@ -147,23 +155,24 @@ async def upload_csv(file: UploadFile = File(...)):
             ''')
             copy_cols = SCHOOL_COLUMNS
 
-        # --- SAFE CSV REWRITE (CLEAN INPUT FOR COPY) ---
+        # ===== CLEAN CSV REWRITE =====
         output = StringIO()
 
-        with open(tmp_path, "r", encoding="utf-8-sig", newline="") as f:
+        with open_csv_safely(tmp_path) as f:
             reader = csv.DictReader(f)
             reader.fieldnames = [normalize(h) for h in reader.fieldnames]
 
             writer = csv.DictWriter(
                 output,
                 fieldnames=copy_cols,
-                extrasaction="ignore"
+                extrasaction="ignore",
+                quoting=csv.QUOTE_MINIMAL
             )
             writer.writeheader()
 
             for row in reader:
-                clean = {col: (row.get(col) or "").strip() for col in copy_cols}
-                writer.writerow(clean)
+                clean_row = {c: (row.get(c) or "").strip() for c in copy_cols}
+                writer.writerow(clean_row)
 
         output.seek(0)
 
@@ -230,20 +239,17 @@ class DeletePayload(BaseModel):
 
 @app.post("/datasets/delete")
 def delete_dataset(payload: DeletePayload):
-    table = payload.table
-
-    if not table.isidentifier():
+    if not payload.table.isidentifier():
         raise HTTPException(status_code=400, detail="Invalid table")
 
     conn = get_db()
     cur = conn.cursor()
 
     try:
-        cur.execute(f'DROP TABLE IF EXISTS "{table}"')
-        cur.execute("DELETE FROM dataset_registry WHERE table_name = %s", (table,))
+        cur.execute(f'DROP TABLE IF EXISTS "{payload.table}"')
+        cur.execute("DELETE FROM dataset_registry WHERE table_name = %s", (payload.table,))
         conn.commit()
         return {"status": "deleted"}
-
     finally:
         cur.close()
         conn.close()
@@ -261,10 +267,7 @@ def download(table: str):
     def stream():
         buf = StringIO()
         try:
-            cur.copy_expert(
-                f'COPY "{table}" TO STDOUT WITH CSV HEADER',
-                buf
-            )
+            cur.copy_expert(f'COPY "{table}" TO STDOUT WITH CSV HEADER', buf)
             buf.seek(0)
             while True:
                 chunk = buf.read(8192)
@@ -279,10 +282,7 @@ def download(table: str):
     return StreamingResponse(
         stream(),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{table}.csv"',
-            "Cache-Control": "no-store"
-        }
+        headers={"Content-Disposition": f'attachment; filename="{table}.csv"'}
     )
 
 # ================= SEARCH =================
@@ -291,7 +291,6 @@ def download(table: str):
 def search(table: str, field: str, value: str):
     if not table.isidentifier():
         raise HTTPException(status_code=400, detail="Invalid table")
-
     if field not in {"school_code", "employee_code"}:
         raise HTTPException(status_code=400, detail="Invalid field")
 
@@ -299,28 +298,16 @@ def search(table: str, field: str, value: str):
     cur = conn.cursor()
 
     try:
-        cur.execute("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema='public'
-              AND table_name=%s
-              AND column_name=%s
-        """, (table, field))
-
-        if cur.fetchone() is None:
-            return {"message": "Code not found", "rows": []}
-
         cur.execute(
             f'SELECT * FROM "{table}" WHERE "{field}"=%s',
             (value.strip(),)
         )
-
         rows = cur.fetchall()
         if not rows:
             return {"message": "Code not found", "rows": []}
 
         cols = [d[0] for d in cur.description]
         return {"rows": [dict(zip(cols, r)) for r in rows]}
-
     finally:
         cur.close()
         conn.close()
