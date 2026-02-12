@@ -196,37 +196,43 @@ def download_table(table: str):
     conn = get_db_conn()
     cur = conn.cursor()
 
-    try:
-        cur.execute(f'SELECT * FROM "{table}"')
-        headers = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-
-    except Exception:
-        raise HTTPException(status_code=404, detail="Table not found")
-
-    finally:
-        cur.close()
-        conn.close()
-
-    def csv_stream():
+    def stream():
         buffer = StringIO()
-        writer = csv.writer(buffer)
 
-        writer.writerow(headers)
-        yield buffer.getvalue()
-        buffer.seek(0)
-        buffer.truncate(0)
-
-        for row in rows:
-            writer.writerow(row)
-            yield buffer.getvalue()
+        try:
+            cur.copy_expert(
+                f'''
+                COPY (
+                    SELECT
+                        school_code,
+                        school_name,
+                        employee_name,
+                        employee_code,
+                        designation
+                    FROM "{table}"
+                )
+                TO STDOUT WITH CSV HEADER
+                ''',
+                buffer
+            )
             buffer.seek(0)
-            buffer.truncate(0)
+
+            while True:
+                chunk = buffer.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+
+        finally:
+            buffer.close()
+            cur.close()
+            conn.close()
 
     return StreamingResponse(
-        csv_stream(),
+        stream(),
         media_type="text/csv",
         headers={
-            "Content-Disposition": f'attachment; filename="{table}.csv"'
+            "Content-Disposition": f'attachment; filename="{table}.csv"',
+            "Cache-Control": "no-store"
         }
     )
