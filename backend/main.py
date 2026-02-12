@@ -30,14 +30,7 @@ app.add_middleware(
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
-# ================= CSV SAFE OPEN =================
-
-def open_csv_safely(path: str):
-    # latin1 never raises UnicodeDecodeError
-    # errors=replace guarantees no crashes
-    return open(path, "r", encoding="latin1", errors="replace", newline="")
-
-# ================= SCHEMA DEFINITIONS =================
+# ================= SCHEMA =================
 
 TEACHER_COLUMNS = [
     "school_code",
@@ -67,17 +60,25 @@ def detect_schema(headers: list[str]) -> str:
 
     if set(TEACHER_COLUMNS).issubset(header_set):
         return "teacher"
-
     if set(SCHOOL_COLUMNS).issubset(header_set):
         return "school"
 
     raise HTTPException(status_code=400, detail="Unrecognized CSV schema")
 
 def build_table_name(schema: str, filename: str) -> str:
-    name = filename.lower().replace(".csv", "")
-    name = re.sub(r"[^a-z0-9_]+", "_", name)
+    name = re.sub(r"[^a-z0-9_]+", "_", filename.lower().replace(".csv", ""))
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     return f"{schema}_{name}_{ts}"
+
+def decode_csv_bytes(raw: bytes) -> str:
+    try:
+        text = raw.decode("utf-8-sig")
+        print("📄 CSV decoded as UTF-8")
+        return text
+    except UnicodeDecodeError:
+        text = raw.decode("latin1")
+        print("📄 CSV decoded as Latin-1")
+        return text
 
 # ================= HEALTH =================
 
@@ -85,39 +86,40 @@ def build_table_name(schema: str, filename: str) -> str:
 def health():
     return {"status": "backend running"}
 
-# ================= UPLOAD CSV =================
+# ================= UPLOAD =================
 
 @app.post("/upload-csv")
 async def upload_csv(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV allowed")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+    raw_bytes = await file.read()
+    csv_text = decode_csv_bytes(raw_bytes)
 
-    # ===== METHOD 1: FIND BAD ROWS =====
-    with open_csv_safely(tmp_path) as f:
-        reader = csv.reader(f)
-        headers = next(reader)
-        expected_cols = len(headers)
+    csv_buffer = StringIO(csv_text)
+    reader = csv.reader(csv_buffer)
 
-        for i, row in enumerate(reader, start=2):
-            if len(row) != expected_cols:
-                print("❌ CSV COLUMN MISMATCH")
-                print("Row:", i)
-                print("Expected:", expected_cols)
-                print("Actual:", len(row))
-                print("Data:", row)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Malformed CSV at row {i}"
-                )
+    try:
+        raw_headers = next(reader)
+    except StopIteration:
+        raise HTTPException(status_code=400, detail="Empty CSV")
 
-    # ===== READ HEADERS FOR SCHEMA =====
-    with open_csv_safely(tmp_path) as f:
-        reader = csv.reader(f)
-        headers = [normalize(h) for h in next(reader)]
+    headers = [normalize(h) for h in raw_headers]
+    expected_cols = len(headers)
+
+    # ---------- ROW VALIDATION (METHOD 1) ----------
+    for i, row in enumerate(reader, start=2):
+        if len(row) != expected_cols:
+            print("❌ CSV COLUMN MISMATCH")
+            print("Row:", i)
+            print("Expected:", expected_cols)
+            print("Actual:", len(row))
+            print("Row data:", row)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Malformed CSV at row {i}"
+            )
+    # ----------------------------------------------
 
     schema = detect_schema(headers)
     table = build_table_name(schema, file.filename)
@@ -152,24 +154,22 @@ async def upload_csv(file: UploadFile = File(...)):
             ''')
             copy_cols = SCHOOL_COLUMNS
 
-        # ===== CLEAN CSV REWRITE =====
+        # ---------- CLEAN CSV REWRITE ----------
+        csv_buffer.seek(0)
+        reader = csv.DictReader(csv_buffer)
+        reader.fieldnames = [normalize(h) for h in reader.fieldnames]
+
         output = StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=copy_cols,
+            extrasaction="ignore"
+        )
+        writer.writeheader()
 
-        with open_csv_safely(tmp_path) as f:
-            reader = csv.DictReader(f)
-            reader.fieldnames = [normalize(h) for h in reader.fieldnames]
-
-            writer = csv.DictWriter(
-                output,
-                fieldnames=copy_cols,
-                extrasaction="ignore",
-                quoting=csv.QUOTE_MINIMAL
-            )
-            writer.writeheader()
-
-            for row in reader:
-                clean_row = {c: (row.get(c) or "").strip() for c in copy_cols}
-                writer.writerow(clean_row)
+        for row in reader:
+            clean = {c: (row.get(c) or "").strip() for c in copy_cols}
+            writer.writerow(clean)
 
         output.seek(0)
 
@@ -200,9 +200,8 @@ async def upload_csv(file: UploadFile = File(...)):
     finally:
         cur.close()
         conn.close()
-        os.remove(tmp_path)
 
-# ================= LIST DATASETS =================
+# ================= DATASETS =================
 
 @app.get("/datasets")
 def list_datasets():
@@ -229,7 +228,7 @@ def list_datasets():
         for r in rows
     ]
 
-# ================= DELETE DATASET =================
+# ================= DELETE =================
 
 class DeletePayload(BaseModel):
     table: str
