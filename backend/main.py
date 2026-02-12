@@ -31,43 +31,41 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 # ================= SCHEMA DEFINITIONS =================
+# IMPORTANT: ordered lists (NOT sets)
 
-TEACHER_COLUMNS = {
+TEACHER_COLUMNS = [
     "school_code",
     "school_name",
     "employee_name",
-    "employee_code",
+    "employee_code",   # alphanumeric → TEXT
     "designation",
-}
+]
 
-SCHOOL_COLUMNS = {
+SCHOOL_COLUMNS = [
     "school_code",
     "school_name",
     "block_name",
     "district_name",
     "lowest_class",
     "highest_class",
-}
+]
 
 # ================= UTILS =================
 
 def normalize(col: str) -> str:
-    col = col.strip().lstrip("\ufeff")  # remove BOM
+    col = col.strip().lstrip("\ufeff")
     return re.sub(r"[^a-z0-9_]+", "_", col.lower())
 
 def detect_schema(headers: list[str]) -> str:
     header_set = set(headers)
 
-    if TEACHER_COLUMNS.issubset(header_set):
+    if set(TEACHER_COLUMNS).issubset(header_set):
         return "teacher"
 
-    if SCHOOL_COLUMNS.issubset(header_set):
+    if set(SCHOOL_COLUMNS).issubset(header_set):
         return "school"
 
-    raise HTTPException(
-        status_code=400,
-        detail="Unrecognized CSV schema"
-    )
+    raise HTTPException(status_code=400, detail="Unrecognized CSV schema")
 
 def build_table_name(schema: str, filename: str) -> str:
     name = filename.lower().replace(".csv", "")
@@ -92,7 +90,8 @@ async def upload_csv(file: UploadFile = File(...)):
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    with open(tmp_path, newline="", encoding="latin1") as f:
+    # --- Read headers safely (UTF-8 BOM safe) ---
+    with open(tmp_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         headers = [normalize(h) for h in next(reader)]
 
@@ -130,7 +129,8 @@ async def upload_csv(file: UploadFile = File(...)):
             ''')
             copy_cols = SCHOOL_COLUMNS
 
-        with open(tmp_path, "r", encoding="latin1") as f:
+        # --- COPY with correct column order ---
+        with open(tmp_path, "r", encoding="utf-8-sig") as f:
             cur.copy_expert(
                 f'''
                 COPY "{table}" ({",".join(copy_cols)})
@@ -262,7 +262,6 @@ def search(table: str, field: str, value: str):
     cur = conn.cursor()
 
     try:
-        # column exists?
         cur.execute("""
             SELECT 1 FROM information_schema.columns
             WHERE table_schema='public'
@@ -275,7 +274,7 @@ def search(table: str, field: str, value: str):
 
         cur.execute(
             f'SELECT * FROM "{table}" WHERE "{field}"=%s',
-            (value,)
+            (value.strip(),)
         )
 
         rows = cur.fetchall()
@@ -283,9 +282,7 @@ def search(table: str, field: str, value: str):
             return {"message": "Code not found", "rows": []}
 
         cols = [d[0] for d in cur.description]
-        return {
-            "rows": [dict(zip(cols, r)) for r in rows]
-        }
+        return {"rows": [dict(zip(cols, r)) for r in rows]}
 
     finally:
         cur.close()
