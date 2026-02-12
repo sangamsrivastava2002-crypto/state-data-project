@@ -82,7 +82,7 @@ def decode_csv_bytes(raw: bytes) -> str:
 
 # ================= HEALTH =================
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {"status": "backend running"}
 
