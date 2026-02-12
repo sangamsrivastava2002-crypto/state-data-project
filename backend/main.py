@@ -33,12 +33,9 @@ def get_db():
 # ================= CSV SAFE OPEN =================
 
 def open_csv_safely(path: str):
-    try:
-        print("📄 CSV opened as utf-8")
-        return open(path, "r", encoding="utf-8-sig", newline="")
-    except UnicodeDecodeError:
-        print("📄 CSV opened as latin1")
-        return open(path, "r", encoding="latin1", newline="")
+    # latin1 never raises UnicodeDecodeError
+    # errors=replace guarantees no crashes
+    return open(path, "r", encoding="latin1", errors="replace", newline="")
 
 # ================= SCHEMA DEFINITIONS =================
 
