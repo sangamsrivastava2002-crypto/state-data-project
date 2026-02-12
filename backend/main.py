@@ -52,6 +52,7 @@ SCHOOL_COLUMNS = {
 # ================= UTILS =================
 
 def normalize(col: str) -> str:
+    col = col.strip().lstrip("\ufeff")  # remove BOM
     return re.sub(r"[^a-z0-9_]+", "_", col.lower())
 
 def detect_schema(headers: list[str]) -> str:
