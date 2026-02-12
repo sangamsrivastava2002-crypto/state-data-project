@@ -5,22 +5,16 @@ from pydantic import BaseModel
 import psycopg2
 import os
 import tempfile
-import re
-import logging
-import time
 import csv
+import re
 from io import StringIO
+from datetime import datetime
 
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ---------------- APP ----------------
 
 app = FastAPI()
 
@@ -31,92 +25,129 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- DB ----------------
+# ================= DB =================
 
-def get_db_conn():
+def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
-# ---------------- UTILS ----------------
+# ================= SCHEMA DEFINITIONS =================
 
-def safe_table_name(filename: str) -> str:
+TEACHER_COLUMNS = {
+    "school_code",
+    "school_name",
+    "employee_name",
+    "employee_code",
+    "designation",
+}
+
+SCHOOL_COLUMNS = {
+    "school_code",
+    "school_name",
+    "block_name",
+    "district_name",
+    "lowest_class",
+    "highest_class",
+}
+
+# ================= UTILS =================
+
+def normalize(col: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", col.lower())
+
+def detect_schema(headers: list[str]) -> str:
+    header_set = set(headers)
+
+    if TEACHER_COLUMNS.issubset(header_set):
+        return "teacher"
+
+    if SCHOOL_COLUMNS.issubset(header_set):
+        return "school"
+
+    raise HTTPException(
+        status_code=400,
+        detail="Unrecognized CSV schema"
+    )
+
+def build_table_name(schema: str, filename: str) -> str:
     name = filename.lower().replace(".csv", "")
     name = re.sub(r"[^a-z0-9_]+", "_", name)
-    return f"data_{name}"
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return f"{schema}_{name}_{ts}"
 
-# ---------------- HEALTH ----------------
+# ================= HEALTH =================
 
 @app.get("/")
 def health():
     return {"status": "backend running"}
 
-# ---------------- CSV UPLOAD ----------------
+# ================= UPLOAD CSV =================
 
 @app.post("/upload-csv")
 async def upload_csv(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV allowed")
 
-    table = safe_table_name(file.filename)
-    logger.info(f"Uploading CSV → {table}")
-
-    conn = get_db_conn()
-    cur = conn.cursor()
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    try:
-        # Create table
-        cur.execute(f'''
-            CREATE TABLE IF NOT EXISTS "{table}" (
-                id BIGSERIAL PRIMARY KEY,
-                school_code VARCHAR(50),
-                school_name TEXT,
-                employee_name TEXT,
-                employee_code VARCHAR(50),
-                designation TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+    with open(tmp_path, newline="", encoding="latin1") as f:
+        reader = csv.reader(f)
+        headers = [normalize(h) for h in next(reader)]
 
-        # Replace data
-        cur.execute(f'TRUNCATE TABLE "{table}"')
+    schema = detect_schema(headers)
+    table = build_table_name(schema, file.filename)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        if schema == "teacher":
+            cur.execute(f'''
+                CREATE TABLE "{table}" (
+                    id BIGSERIAL PRIMARY KEY,
+                    school_code TEXT,
+                    school_name TEXT,
+                    employee_name TEXT,
+                    employee_code TEXT,
+                    designation TEXT
+                )
+            ''')
+            copy_cols = TEACHER_COLUMNS
+
+        else:
+            cur.execute(f'''
+                CREATE TABLE "{table}" (
+                    id BIGSERIAL PRIMARY KEY,
+                    school_code TEXT,
+                    school_name TEXT,
+                    block_name TEXT,
+                    district_name TEXT,
+                    lowest_class TEXT,
+                    highest_class TEXT
+                )
+            ''')
+            copy_cols = SCHOOL_COLUMNS
 
         with open(tmp_path, "r", encoding="latin1") as f:
-            cur.copy_expert(f'''
-                COPY "{table}" (
-                    school_code,
-                    school_name,
-                    employee_name,
-                    employee_code,
-                    designation
-                )
-                FROM STDIN
-                WITH CSV HEADER
-            ''', f)
+            cur.copy_expert(
+                f'''
+                COPY "{table}" ({",".join(copy_cols)})
+                FROM STDIN WITH CSV HEADER
+                ''',
+                f
+            )
 
-        # Count rows
         cur.execute(f'SELECT COUNT(*) FROM "{table}"')
-        row_count = cur.fetchone()[0]
+        rows = cur.fetchone()[0]
 
-        # Register dataset (single source of truth)
         cur.execute("""
-            INSERT INTO dataset_registry (table_name, original_filename, row_count)
+            INSERT INTO dataset_registry (table_name, dataset_type, row_count)
             VALUES (%s, %s, %s)
-            ON CONFLICT (table_name)
-            DO UPDATE SET
-                original_filename = EXCLUDED.original_filename,
-                row_count = EXCLUDED.row_count,
-                uploaded_at = CURRENT_TIMESTAMP
-        """, (table, file.filename, row_count))
+        """, (table, schema, rows))
 
         conn.commit()
-
-        return {
-            "table": table,
-            "rows": row_count
-        }
+        return {"table": table, "type": schema, "rows": rows}
 
     except Exception as e:
         conn.rollback()
@@ -127,15 +158,15 @@ async def upload_csv(file: UploadFile = File(...)):
         conn.close()
         os.remove(tmp_path)
 
-# ---------------- DATASET LIST ----------------
+# ================= LIST DATASETS =================
 
 @app.get("/datasets")
 def list_datasets():
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT table_name, original_filename, row_count, uploaded_at
+        SELECT table_name, dataset_type, row_count, uploaded_at
         FROM dataset_registry
         ORDER BY uploaded_at DESC
     """)
@@ -147,14 +178,14 @@ def list_datasets():
     return [
         {
             "table": r[0],
-            "filename": r[1],
+            "type": r[1],
             "rows": r[2],
-            "uploaded_at": r[3]
+            "uploaded_at": r[3],
         }
         for r in rows
     ]
 
-# ---------------- DELETE DATASET ----------------
+# ================= DELETE DATASET =================
 
 class DeletePayload(BaseModel):
     table: str
@@ -164,67 +195,46 @@ def delete_dataset(payload: DeletePayload):
     table = payload.table
 
     if not table.isidentifier():
-        raise HTTPException(status_code=400, detail="Invalid table name")
+        raise HTTPException(status_code=400, detail="Invalid table")
 
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
 
     try:
         cur.execute(f'DROP TABLE IF EXISTS "{table}"')
-        cur.execute(
-            "DELETE FROM dataset_registry WHERE table_name = %s",
-            (table,)
-        )
+        cur.execute("DELETE FROM dataset_registry WHERE table_name = %s", (table,))
         conn.commit()
         return {"status": "deleted"}
-
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
 
     finally:
         cur.close()
         conn.close()
 
-# ---------------- DOWNLOAD DATASET ----------------
+# ================= DOWNLOAD =================
 
 @app.get("/download/{table}")
-def download_table(table: str):
+def download(table: str):
     if not table.isidentifier():
-        raise HTTPException(status_code=400, detail="Invalid table name")
+        raise HTTPException(status_code=400, detail="Invalid table")
 
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
 
     def stream():
-        buffer = StringIO()
-
+        buf = StringIO()
         try:
             cur.copy_expert(
-                f'''
-                COPY (
-                    SELECT
-                        school_code,
-                        school_name,
-                        employee_name,
-                        employee_code,
-                        designation
-                    FROM "{table}"
-                )
-                TO STDOUT WITH CSV HEADER
-                ''',
-                buffer
+                f'COPY "{table}" TO STDOUT WITH CSV HEADER',
+                buf
             )
-            buffer.seek(0)
-
+            buf.seek(0)
             while True:
-                chunk = buffer.read(8192)
+                chunk = buf.read(8192)
                 if not chunk:
                     break
                 yield chunk
-
         finally:
-            buffer.close()
+            buf.close()
             cur.close()
             conn.close()
 
@@ -236,3 +246,46 @@ def download_table(table: str):
             "Cache-Control": "no-store"
         }
     )
+
+# ================= SEARCH =================
+
+@app.get("/search")
+def search(table: str, field: str, value: str):
+    if not table.isidentifier():
+        raise HTTPException(status_code=400, detail="Invalid table")
+
+    if field not in {"school_code", "employee_code"}:
+        raise HTTPException(status_code=400, detail="Invalid field")
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        # column exists?
+        cur.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public'
+              AND table_name=%s
+              AND column_name=%s
+        """, (table, field))
+
+        if cur.fetchone() is None:
+            return {"message": "Code not found", "rows": []}
+
+        cur.execute(
+            f'SELECT * FROM "{table}" WHERE "{field}"=%s',
+            (value,)
+        )
+
+        rows = cur.fetchall()
+        if not rows:
+            return {"message": "Code not found", "rows": []}
+
+        cols = [d[0] for d in cur.description]
+        return {
+            "rows": [dict(zip(cols, r)) for r in rows]
+        }
+
+    finally:
+        cur.close()
+        conn.close()
