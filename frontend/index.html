@@ -5,9 +5,7 @@
   <title>Search Data</title>
 
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       font-family: Arial, sans-serif;
@@ -61,8 +59,6 @@
       background: #45a049;
     }
 
-    /* ===== TABLE STYLES (EXCEL-LIKE) ===== */
-
     table {
       width: 100%;
       border-collapse: collapse;
@@ -74,23 +70,16 @@
       border: 1px solid #ddd;
       padding: 10px;
       text-align: left;
-      vertical-align: top;
     }
 
     th {
       background-color: #f2f2f2;
-      font-weight: bold;
       position: sticky;
       top: 0;
-      z-index: 1;
     }
 
     tr:nth-child(even) {
       background-color: #fafafa;
-    }
-
-    tr:hover {
-      background-color: #f1f1f1;
     }
 
     .table-wrapper {
@@ -110,132 +99,98 @@
 </head>
 
 <body>
+<div class="container">
+  <h2>🔍 Search Registry Data</h2>
 
-  <div class="container">
-    <h2>🔍 Search Registry Data</h2>
+  <!-- Table -->
+  <label>Select Dataset:</label>
+  <select id="table">
+    <option value="">Select dataset</option>
+  </select>
 
-    <!-- Dataset Selection -->
-    <label for="table">Select State:</label>
-    <select id="table">
-      <option value="">Select by School</option>
-    </select>
+  <!-- Field -->
+  <label>Search By:</label>
+  <select id="field">
+    <option value="">Select field</option>
+    <option value="school_code">School Code</option>
+    <option value="employee_code">Employee Code</option>
+  </select>
 
-    <!-- School Code -->
-    <label for="code">Search by School Code:</label>
-    <input
-      type="text"
-      id="code"
-      placeholder="Enter School Code"
-    >
+  <!-- Value -->
+  <label>Enter Code:</label>
+  <input id="value" placeholder="Enter value">
 
-    <!-- Search Button -->
-    <button onclick="searchData()">Search</button>
+  <button onclick="search()">Search</button>
 
-    <!-- Info -->
-    <div class="info" id="info"></div>
+  <div class="info" id="info"></div>
+  <div id="result"></div>
+</div>
 
-    <!-- Result -->
-    <div id="result"></div>
-  </div>
+<script>
+const BACKEND = "https://state-data-project-1.onrender.com";
 
-  <script>
-    const BACKEND_URL = "https://state-data-project-1.onrender.com";
+// Load datasets
+window.onload = () => {
+  fetch(`${BACKEND}/datasets`)
+    .then(r => r.json())
+    .then(data => {
+      const select = document.getElementById("table");
+      data.forEach(d => {
+        const opt = document.createElement("option");
+        opt.value = d.table;
+        opt.textContent = `${d.table} (${d.type}, ${d.rows} rows)`;
+        select.appendChild(opt);
+      });
+    });
+};
 
-    // Load datasets (tables)
-    window.onload = () => {
-      fetch(`${BACKEND_URL}/tables`)
-        .then(res => res.json())
-        .then(tables => {
-          const select = document.getElementById("table");
+function search() {
+  const table = document.getElementById("table").value;
+  const field = document.getElementById("field").value;
+  const value = document.getElementById("value").value.trim();
+  const info = document.getElementById("info");
+  const result = document.getElementById("result");
 
-          tables.forEach(fullTableName => {
-            const option = document.createElement("option");
+  if (!table || !field || !value) {
+    alert("Select dataset, field, and enter value");
+    return;
+  }
 
-            // Backend expects RAW name (without data_)
-            option.value = fullTableName.startsWith("data_")
-              ? fullTableName.slice(5)
-              : fullTableName;
+  info.innerText = "Searching...";
+  result.innerHTML = "";
 
-            // User sees full table name
-            option.textContent = fullTableName;
+  const url =
+    `${BACKEND}/search?table=${encodeURIComponent(table)}&field=${encodeURIComponent(field)}&value=${encodeURIComponent(value)}`;
 
-            select.appendChild(option);
-          });
-        })
-        .catch(() => {
-          alert("Failed to load datasets");
-        });
-    };
-
-    function searchData() {
-      const table = document.getElementById("table").value.trim();
-      const schoolCode = document.getElementById("code").value.trim();
-      const resultDiv = document.getElementById("result");
-      const infoDiv = document.getElementById("info");
-
-      if (!table || !schoolCode) {
-        alert("Select dataset and enter school code");
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.rows || data.rows.length === 0) {
+        info.innerText = "Code not found";
         return;
       }
 
-      infoDiv.innerText = "Searching...";
-      resultDiv.innerHTML = "";
+      info.innerText = `Records found: ${data.rows.length}`;
 
-      const url =
-        `${BACKEND_URL}/search?table=${encodeURIComponent(table)}&school_code=${encodeURIComponent(schoolCode)}`;
+      const cols = Object.keys(data.rows[0]);
+      let html = `<div class="table-wrapper"><table><thead><tr>`;
 
-      fetch(url)
-        .then(res => res.json())
-        .then(data => {
-          if (!data || data.length === 0) {
-            infoDiv.innerText = "No records found";
-            resultDiv.innerHTML = "";
-            return;
-          }
+      cols.forEach(c => html += `<th>${c}</th>`);
+      html += `</tr></thead><tbody>`;
 
-          infoDiv.innerText = `Total records found: ${data.length}`;
+      data.rows.forEach(row => {
+        html += "<tr>";
+        cols.forEach(c => html += `<td>${row[c] ?? ""}</td>`);
+        html += "</tr>";
+      });
 
-          let html = `
-            <div class="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th>School Code</th>
-                    <th>School Name</th>
-                    <th>Employee Name</th>
-                    <th>Employee Code</th>
-                    <th>Designation</th>
-                  </tr>
-                </thead>
-                <tbody>
-          `;
-
-          data.forEach(row => {
-            html += `
-              <tr>
-                <td>${row[0] ?? ""}</td>
-                <td>${row[1] ?? ""}</td>
-                <td>${row[2] ?? ""}</td>
-                <td>${row[3] ?? ""}</td>
-                <td>${row[4] ?? ""}</td>
-              </tr>
-            `;
-          });
-
-          html += `
-                </tbody>
-              </table>
-            </div>
-          `;
-
-          resultDiv.innerHTML = html;
-        })
-        .catch(() => {
-          infoDiv.innerText = "";
-          resultDiv.innerHTML = "<p>Error fetching data</p>";
-        });
-    }
-  </script>
-
+      html += `</tbody></table></div>`;
+      result.innerHTML = html;
+    })
+    .catch(() => {
+      info.innerText = "Error searching data";
+    });
+}
+</script>
 </body>
 </html>
