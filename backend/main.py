@@ -31,13 +31,12 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 # ================= SCHEMA DEFINITIONS =================
-# IMPORTANT: ordered lists (NOT sets)
 
 TEACHER_COLUMNS = [
     "school_code",
     "school_name",
     "employee_name",
-    "employee_code",   # alphanumeric → TEXT
+    "employee_code",
     "designation",
 ]
 
@@ -90,7 +89,26 @@ async def upload_csv(file: UploadFile = File(...)):
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    # --- Read headers safely (UTF-8 BOM safe) ---
+    # ===== METHOD 1: DETECT BAD ROWS =====
+    with open(tmp_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        headers = next(reader)
+        expected_cols = len(headers)
+
+        for i, row in enumerate(reader, start=2):
+            if len(row) != expected_cols:
+                print("❌ CSV COLUMN MISMATCH DETECTED")
+                print("Row number:", i)
+                print("Expected columns:", expected_cols)
+                print("Actual columns:", len(row))
+                print("Row content:", row)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CSV malformed at row {i}"
+                )
+    # ====================================
+
+    # --- Read headers for schema detection ---
     with open(tmp_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         headers = [normalize(h) for h in next(reader)]
@@ -129,15 +147,33 @@ async def upload_csv(file: UploadFile = File(...)):
             ''')
             copy_cols = SCHOOL_COLUMNS
 
-        # --- COPY with correct column order ---
-        with open(tmp_path, "r", encoding="utf-8-sig") as f:
-            cur.copy_expert(
-                f'''
-                COPY "{table}" ({",".join(copy_cols)})
-                FROM STDIN WITH CSV HEADER
-                ''',
-                f
+        # --- SAFE CSV REWRITE (CLEAN INPUT FOR COPY) ---
+        output = StringIO()
+
+        with open(tmp_path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [normalize(h) for h in reader.fieldnames]
+
+            writer = csv.DictWriter(
+                output,
+                fieldnames=copy_cols,
+                extrasaction="ignore"
             )
+            writer.writeheader()
+
+            for row in reader:
+                clean = {col: (row.get(col) or "").strip() for col in copy_cols}
+                writer.writerow(clean)
+
+        output.seek(0)
+
+        cur.copy_expert(
+            f'''
+            COPY "{table}" ({",".join(copy_cols)})
+            FROM STDIN WITH CSV HEADER
+            ''',
+            output
+        )
 
         cur.execute(f'SELECT COUNT(*) FROM "{table}"')
         rows = cur.fetchone()[0]
@@ -152,6 +188,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
     except Exception as e:
         conn.rollback()
+        print("🔥 UPLOAD ERROR:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
