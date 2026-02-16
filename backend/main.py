@@ -73,12 +73,25 @@ def build_table_name(schema: str, filename: str) -> str:
     return f"{schema}_{name}_{ts}"
 
 def decode_csv_bytes(raw: bytes) -> str:
-    result = from_bytes(raw).best()
-    if not result:
-        raise HTTPException(status_code=400, detail="Unable to detect file encoding")
+    # 1️⃣ First, try UTF-8 (with BOM support)
+    try:
+        text = raw.decode("utf-8-sig")
+        print("📄 CSV decoded as utf-8-sig")
+        return text
+    except UnicodeDecodeError:
+        pass
 
-    print(f"📄 CSV decoded as {result.encoding}")
-    return str(result)
+    # 2️⃣ Fallback to charset-normalizer
+    result = from_bytes(raw).best()
+    if result:
+        print(f"📄 CSV decoded as {result.encoding} (charset-normalizer)")
+        return str(result)
+
+    # 3️⃣ Give up
+    raise HTTPException(
+        status_code=400,
+        detail="Unable to decode CSV file. Unsupported encoding."
+    )
 
 # ================= HEALTH =================
 
