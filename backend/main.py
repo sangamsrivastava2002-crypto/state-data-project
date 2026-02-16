@@ -73,7 +73,7 @@ def build_table_name(schema: str, filename: str) -> str:
     return f"{schema}_{name}_{ts}"
 
 def decode_csv_bytes(raw: bytes) -> str:
-    # 1️⃣ First, try UTF-8 (with BOM support)
+    # First try UTF-8 with BOM support
     try:
         text = raw.decode("utf-8-sig")
         print("📄 CSV decoded as utf-8-sig")
@@ -81,16 +81,15 @@ def decode_csv_bytes(raw: bytes) -> str:
     except UnicodeDecodeError:
         pass
 
-    # 2️⃣ Fallback to charset-normalizer
+    # Fallback to charset-normalizer
     result = from_bytes(raw).best()
     if result:
-        print(f"📄 CSV decoded as {result.encoding} (charset-normalizer)")
+        print(f"📄 CSV decoded as {result.encoding}")
         return str(result)
 
-    # 3️⃣ Give up
     raise HTTPException(
         status_code=400,
-        detail="Unable to decode CSV file. Unsupported encoding."
+        detail="Unable to decode CSV file"
     )
 
 # ================= HEALTH =================
@@ -110,25 +109,16 @@ async def upload_csv(file: UploadFile = File(...)):
     csv_text = decode_csv_bytes(raw_bytes)
 
     csv_buffer = StringIO(csv_text)
-    reader = csv.reader(csv_buffer)
+    reader = csv.DictReader(csv_buffer)
 
-    try:
-        raw_headers = next(reader)
-    except StopIteration:
+    if not reader.fieldnames:
         raise HTTPException(status_code=400, detail="Empty CSV")
 
-    headers = [normalize(h) for h in raw_headers]
-    expected_cols = len(headers)
+    # Normalize headers
+    headers = [normalize(h) for h in reader.fieldnames]
+    reader.fieldnames = headers
 
     print("🧠 Normalized headers:", headers)
-
-    # ---------- ROW VALIDATION ----------
-    for i, row in enumerate(reader, start=2):
-        if len(row) != expected_cols:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Malformed CSV at row {i}"
-            )
 
     schema = detect_schema(headers)
     table = build_table_name(schema, file.filename)
@@ -164,10 +154,6 @@ async def upload_csv(file: UploadFile = File(...)):
             copy_cols = SCHOOL_COLUMNS
 
         # ---------- CLEAN CSV REWRITE ----------
-        csv_buffer.seek(0)
-        reader = csv.DictReader(csv_buffer)
-        reader.fieldnames = [normalize(h) for h in reader.fieldnames]
-
         output = StringIO()
         writer = csv.DictWriter(
             output,
