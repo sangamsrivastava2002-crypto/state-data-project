@@ -114,29 +114,28 @@ async def upload_csv(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV allowed")
 
-    raw_bytes = await file.read()
-    csv_text = decode_csv_bytes(raw_bytes)
-
-    csv_buffer = StringIO(csv_text)
-    reader = csv.DictReader(csv_buffer)
-
-    if not reader.fieldnames:
-        raise HTTPException(status_code=400, detail="Empty CSV")
-
-    # Normalize headers
-    headers = [normalize(h) for h in reader.fieldnames]
-    reader.fieldnames = headers
-
-    print("🧠 Normalized headers:", headers)
-
-    schema = detect_schema(headers)
-    table = build_table_name(schema, file.filename)
-
+    # --- DB ---
     conn = get_db()
     cur = conn.cursor()
 
     try:
+        # --- STREAM DECODE ---
+        raw = await file.read()          # decode ONCE
+        text = decode_csv_bytes(raw)
+        stream = StringIO(text)
+
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames:
+            raise HTTPException(status_code=400, detail="Empty CSV")
+
+        headers = [normalize(h) for h in reader.fieldnames]
+        reader.fieldnames = headers
+
+        schema = detect_schema(headers)
+        table = build_table_name(schema, file.filename)
+
         if schema == "teacher":
+            copy_cols = TEACHER_COLUMNS
             cur.execute(f'''
                 CREATE TABLE "{table}" (
                     id BIGSERIAL PRIMARY KEY,
@@ -147,8 +146,8 @@ async def upload_csv(file: UploadFile = File(...)):
                     designation TEXT
                 )
             ''')
-            copy_cols = TEACHER_COLUMNS
         else:
+            copy_cols = SCHOOL_COLUMNS
             cur.execute(f'''
                 CREATE TABLE "{table}" (
                     id BIGSERIAL PRIMARY KEY,
@@ -160,29 +159,22 @@ async def upload_csv(file: UploadFile = File(...)):
                     highest_class TEXT
                 )
             ''')
-            copy_cols = SCHOOL_COLUMNS
 
-        # ---------- CLEAN CSV REWRITE ----------
-        output = StringIO()
-        writer = csv.DictWriter(
-            output,
-            fieldnames=copy_cols,
-            extrasaction="ignore"
-        )
-        writer.writeheader()
-
-        for row in reader:
-            clean = {c: (row.get(c) or "").strip() for c in copy_cols}
-            writer.writerow(clean)
-
-        output.seek(0)
+        # --- STREAM INTO COPY ---
+        def row_generator():
+            yield ",".join(copy_cols) + "\n"   # CSV header
+            for row in reader:
+                yield ",".join(
+                    '"' + (row.get(c, "") or "").replace('"', '""').strip() + '"'
+                    for c in copy_cols
+                ) + "\n"
 
         cur.copy_expert(
             f'''
             COPY "{table}" ({",".join(copy_cols)})
             FROM STDIN WITH CSV HEADER
             ''',
-            output
+            row_generator()
         )
 
         cur.execute(f'SELECT COUNT(*) FROM "{table}"')
@@ -204,6 +196,7 @@ async def upload_csv(file: UploadFile = File(...)):
     finally:
         cur.close()
         conn.close()
+
 
 # ================= DATASETS =================
 
