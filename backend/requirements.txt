@@ -3,3 +3,4 @@ uvicorn
 pandas
 psycopg2-binary
 python-multipart
+charset-normalizer
