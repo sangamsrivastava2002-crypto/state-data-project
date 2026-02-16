@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from charset_normalizer import from_bytes
-
+from diagnostics import DiagnosticError, Stage
 import psycopg2
 import os
 import csv
@@ -65,7 +65,7 @@ def detect_schema(headers: list[str]) -> str:
     if set(SCHOOL_COLUMNS).issubset(header_set):
         return "school"
 
-    raise HTTPException(status_code=400, detail="Unrecognized CSV schema")
+    raise DiagnosticError(stage=Stage.SCHEMA,message="Unrecognized CSV schema",hint=f"Headers received: {headers}",)
 
 
 def build_table_name(schema: str, filename: str) -> str:
@@ -76,40 +76,41 @@ def build_table_name(schema: str, filename: str) -> str:
 def decode_csv_bytes(raw: bytes) -> str:
     # 1️⃣ UTF-16 (Excel favorite)
     try:
-        text = raw.decode("utf-16")
-        print("📄 CSV decoded as utf-16")
-        return text
+        return raw.decode("utf-16")
     except UnicodeDecodeError:
         pass
 
     # 2️⃣ UTF-8 with BOM
     try:
-        text = raw.decode("utf-8-sig")
-        print("📄 CSV decoded as utf-8-sig")
-        return text
+        return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         pass
 
     # 3️⃣ Charset auto-detection (Latin-1, Windows-1252)
     result = from_bytes(raw).best()
     if result:
-        print(f"📄 CSV decoded as {result.encoding}")
         return str(result)
 
-    raise HTTPException(
-        status_code=400,
-        detail="Unable to decode CSV file (unsupported encoding)"
-    )
+    raise DiagnosticError(stage=Stage.ENCODING, message="Unable to decode CSV file",hint="Use UTF-8, UTF-16, or Windows-1252 encoding",)
+
 
 MAX_FIELD_BYTES = 100_000  # safely below Postgres COPY limit (131072)
 
-def safe_cell(value: str) -> str:
+def safe_cell(value: str, row: int, column: str) -> str:
     if not value:
         return ""
+
     data = value.encode("utf-8", errors="ignore")
-    if len(data) <= MAX_FIELD_BYTES:
-        return value
-    return data[:MAX_FIELD_BYTES].decode("utf-8", errors="ignore")
+    if len(data) > MAX_FIELD_BYTES:
+        raise DiagnosticError(
+            stage=Stage.ROW,
+            message="Field exceeds PostgreSQL COPY size limit",
+            row=row,
+            column=column,
+            hint="Very large text detected (possibly corrupted data)",
+        )
+    return value
+
 
 
 
@@ -180,14 +181,41 @@ async def upload_csv(file: UploadFile = File(...)):
         row_count = 0
         total_rows = 0
 
-        for row in reader:
-            writer.writerow([safe_cell((row.get(c) or "").strip())for c in copy_cols])
-
+        for row_num, row in enumerate(reader, start=2):
+            writer.writerow([
+                safe_cell((row.get(c) or "").strip(), row_num, c)
+                for c in copy_cols
+            ])
+        
             row_count += 1
             total_rows += 1
-
+        
             if row_count >= BATCH_SIZE:
                 buffer.seek(0)
+                try:
+                    cur.copy_expert(
+                        f'''
+                        COPY "{table}" ({",".join(copy_cols)})
+                        FROM STDIN WITH CSV
+                        ''',
+                        buffer
+                    )
+                except psycopg2.Error as e:
+                    raise DiagnosticError(
+                        stage=Stage.COPY,
+                        message="PostgreSQL COPY failed",
+                        hint=e.pgerror.split("\n")[0] if e.pgerror else str(e),
+                    )
+            
+                buffer = StringIO()
+                writer = csv.writer(buffer)
+                row_count = 0
+
+
+        # Flush remaining rows
+        if row_count > 0:
+            buffer.seek(0)
+            try:
                 cur.copy_expert(
                     f'''
                     COPY "{table}" ({",".join(copy_cols)})
@@ -195,20 +223,13 @@ async def upload_csv(file: UploadFile = File(...)):
                     ''',
                     buffer
                 )
-                buffer = StringIO()
-                writer = csv.writer(buffer)
-                row_count = 0
+            except psycopg2.Error as e:
+                raise DiagnosticError(
+                    stage=Stage.COPY,
+                    message="PostgreSQL COPY failed",
+                    hint=e.pgerror.split("\n")[0] if e.pgerror else str(e),
+                )
 
-        # Flush remaining rows
-        if row_count > 0:
-            buffer.seek(0)
-            cur.copy_expert(
-                f'''
-                COPY "{table}" ({",".join(copy_cols)})
-                FROM STDIN WITH CSV
-                ''',
-                buffer
-            )
 
         cur.execute(f'SELECT COUNT(*) FROM "{table}"')
         rows = cur.fetchone()[0]
@@ -221,10 +242,25 @@ async def upload_csv(file: UploadFile = File(...)):
         conn.commit()
         return {"table": table, "type": schema, "rows": rows}
 
+    except DiagnosticError:
+        conn.rollback()
+        raise  # let global handler deal with it
+    
+    except psycopg2.Error as e:
+        conn.rollback()
+        raise DiagnosticError(
+            stage=Stage.DB,
+            message="Database operation failed",
+            hint=e.pgerror.split("\n")[0] if e.pgerror else str(e),
+        )
+    
     except Exception as e:
         conn.rollback()
-        print("🔥 UPLOAD ERROR:", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise DiagnosticError(
+            stage=Stage.DB,
+            message="Unexpected server error during upload",
+            hint=str(e),
+        )
 
     finally:
         cur.close()
@@ -272,8 +308,16 @@ def delete_dataset(payload: DeletePayload):
     cur = conn.cursor()
 
     try:
-        cur.execute(f'DROP TABLE IF EXISTS "{payload.table}"')
         cur.execute("DELETE FROM dataset_registry WHERE table_name = %s", (payload.table,))
+
+        if cur.rowcount == 0:
+            raise DiagnosticError(
+                stage=Stage.DELETE,
+                message="Delete failed: dataset not found",
+                hint=f"table={payload.table}",
+            )
+        
+        cur.execute(f'DROP TABLE IF EXISTS "{payload.table}"')
         conn.commit()
         return {"status": "deleted"}
     finally:
@@ -330,7 +374,11 @@ def search(table: str, field: str, value: str):
         )
         rows = cur.fetchall()
         if not rows:
-            return {"message": "Code not found", "rows": []}
+            raise DiagnosticError(
+                stage=Stage.SEARCH,
+                message="No matching records found",
+                hint=f"{field} = {value}",
+            )
 
         cols = [d[0] for d in cur.description]
         return {"rows": [dict(zip(cols, r)) for r in rows]}
