@@ -100,7 +100,7 @@ def decode_csv_bytes(raw: bytes) -> str:
         detail="Unable to decode CSV file (unsupported encoding)"
     )
 
-MAX_FIELD_BYTES = 120_000  # safely below Postgres COPY limit (131072)
+MAX_FIELD_BYTES = 100_000  # safely below Postgres COPY limit (131072)
 
 def safe_cell(value: str) -> str:
     if not value:
