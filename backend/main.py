@@ -100,6 +100,17 @@ def decode_csv_bytes(raw: bytes) -> str:
         detail="Unable to decode CSV file (unsupported encoding)"
     )
 
+MAX_FIELD_BYTES = 120_000  # safely below Postgres COPY limit (131072)
+
+def safe_cell(value: str) -> str:
+    if not value:
+        return ""
+    data = value.encode("utf-8", errors="ignore")
+    if len(data) <= MAX_FIELD_BYTES:
+        return value
+    return data[:MAX_FIELD_BYTES].decode("utf-8", errors="ignore")
+
+
 
 # ================= HEALTH =================
 
@@ -169,7 +180,8 @@ async def upload_csv(file: UploadFile = File(...)):
         total_rows = 0
 
         for row in reader:
-            writer.writerow([(row.get(c) or "").strip() for c in copy_cols])
+            writer.writerow([safe_cell((row.get(c) or "").strip())for c in copy_cols])
+
             row_count += 1
             total_rows += 1
 
