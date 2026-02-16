@@ -114,13 +114,12 @@ async def upload_csv(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV allowed")
 
-    # --- DB ---
     conn = get_db()
     cur = conn.cursor()
 
     try:
-        # --- STREAM DECODE ---
-        raw = await file.read()          # decode ONCE
+        # Read & decode ONCE
+        raw = await file.read()
         text = decode_csv_bytes(raw)
         stream = StringIO(text)
 
@@ -160,22 +159,43 @@ async def upload_csv(file: UploadFile = File(...)):
                 )
             ''')
 
-        # --- STREAM INTO COPY ---
-        def row_generator():
-            yield ",".join(copy_cols) + "\n"   # CSV header
-            for row in reader:
-                yield ",".join(
-                    '"' + (row.get(c, "") or "").replace('"', '""').strip() + '"'
-                    for c in copy_cols
-                ) + "\n"
+        # --- CHUNKED COPY ---
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(copy_cols)  # header
 
-        cur.copy_expert(
-            f'''
-            COPY "{table}" ({",".join(copy_cols)})
-            FROM STDIN WITH CSV HEADER
-            ''',
-            row_generator()
-        )
+        BATCH_SIZE = 5000
+        row_count = 0
+        total_rows = 0
+
+        for row in reader:
+            writer.writerow([(row.get(c) or "").strip() for c in copy_cols])
+            row_count += 1
+            total_rows += 1
+
+            if row_count >= BATCH_SIZE:
+                buffer.seek(0)
+                cur.copy_expert(
+                    f'''
+                    COPY "{table}" ({",".join(copy_cols)})
+                    FROM STDIN WITH CSV
+                    ''',
+                    buffer
+                )
+                buffer = StringIO()
+                writer = csv.writer(buffer)
+                row_count = 0
+
+        # Flush remaining rows
+        if row_count > 0:
+            buffer.seek(0)
+            cur.copy_expert(
+                f'''
+                COPY "{table}" ({",".join(copy_cols)})
+                FROM STDIN WITH CSV
+                ''',
+                buffer
+            )
 
         cur.execute(f'SELECT COUNT(*) FROM "{table}"')
         rows = cur.fetchone()[0]
