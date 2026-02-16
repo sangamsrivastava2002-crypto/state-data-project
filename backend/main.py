@@ -2,9 +2,10 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from charset_normalizer import from_bytes
+
 import psycopg2
 import os
-import tempfile
 import csv
 import re
 from io import StringIO
@@ -52,7 +53,8 @@ SCHOOL_COLUMNS = [
 # ================= UTILS =================
 
 def normalize(col: str) -> str:
-    col = col.strip().lstrip("\ufeff")
+    col = col.replace("\ufeff", "")
+    col = col.strip()
     return re.sub(r"[^a-z0-9_]+", "_", col.lower())
 
 def detect_schema(headers: list[str]) -> str:
@@ -71,14 +73,12 @@ def build_table_name(schema: str, filename: str) -> str:
     return f"{schema}_{name}_{ts}"
 
 def decode_csv_bytes(raw: bytes) -> str:
-    try:
-        text = raw.decode("utf-8-sig")
-        print("📄 CSV decoded as UTF-8")
-        return text
-    except UnicodeDecodeError:
-        text = raw.decode("latin1")
-        print("📄 CSV decoded as Latin-1")
-        return text
+    result = from_bytes(raw).best()
+    if not result:
+        raise HTTPException(status_code=400, detail="Unable to detect file encoding")
+
+    print(f"📄 CSV decoded as {result.encoding}")
+    return str(result)
 
 # ================= HEALTH =================
 
@@ -107,19 +107,15 @@ async def upload_csv(file: UploadFile = File(...)):
     headers = [normalize(h) for h in raw_headers]
     expected_cols = len(headers)
 
-    # ---------- ROW VALIDATION (METHOD 1) ----------
+    print("🧠 Normalized headers:", headers)
+
+    # ---------- ROW VALIDATION ----------
     for i, row in enumerate(reader, start=2):
         if len(row) != expected_cols:
-            print("❌ CSV COLUMN MISMATCH")
-            print("Row:", i)
-            print("Expected:", expected_cols)
-            print("Actual:", len(row))
-            print("Row data:", row)
             raise HTTPException(
                 status_code=400,
                 detail=f"Malformed CSV at row {i}"
             )
-    # ----------------------------------------------
 
     schema = detect_schema(headers)
     table = build_table_name(schema, file.filename)
