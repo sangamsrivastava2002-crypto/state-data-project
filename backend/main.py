@@ -73,7 +73,15 @@ def build_table_name(schema: str, filename: str) -> str:
     return f"{schema}_{name}_{ts}"
 
 def decode_csv_bytes(raw: bytes) -> str:
-    # First try UTF-8 with BOM support
+    # 1️⃣ UTF-16 (Excel favorite)
+    try:
+        text = raw.decode("utf-16")
+        print("📄 CSV decoded as utf-16")
+        return text
+    except UnicodeDecodeError:
+        pass
+
+    # 2️⃣ UTF-8 with BOM
     try:
         text = raw.decode("utf-8-sig")
         print("📄 CSV decoded as utf-8-sig")
@@ -81,7 +89,7 @@ def decode_csv_bytes(raw: bytes) -> str:
     except UnicodeDecodeError:
         pass
 
-    # Fallback to charset-normalizer
+    # 3️⃣ Charset auto-detection (Latin-1, Windows-1252)
     result = from_bytes(raw).best()
     if result:
         print(f"📄 CSV decoded as {result.encoding}")
@@ -89,8 +97,9 @@ def decode_csv_bytes(raw: bytes) -> str:
 
     raise HTTPException(
         status_code=400,
-        detail="Unable to decode CSV file"
+        detail="Unable to decode CSV file (unsupported encoding)"
     )
+)
 
 # ================= HEALTH =================
 
