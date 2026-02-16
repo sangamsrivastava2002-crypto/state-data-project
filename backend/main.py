@@ -99,7 +99,7 @@ def decode_csv_bytes(raw: bytes) -> str:
         status_code=400,
         detail="Unable to decode CSV file (unsupported encoding)"
     )
-)
+
 
 # ================= HEALTH =================
 
