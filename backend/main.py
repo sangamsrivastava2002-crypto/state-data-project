@@ -53,15 +53,18 @@ SCHOOL_COLUMNS = [
 # ================= UTILS =================
 
 def normalize(col: str) -> str:
-    col = col.replace("\ufeff", "").strip()
+    col = col.replace("\ufeff", "")
+    col = col.strip()
     return re.sub(r"[^a-z0-9_]+", "_", col.lower())
 
 def detect_schema(headers: list[str]) -> str:
     header_set = set(headers)
+
     if set(TEACHER_COLUMNS).issubset(header_set):
         return "teacher"
     if set(SCHOOL_COLUMNS).issubset(header_set):
         return "school"
+
     raise HTTPException(status_code=400, detail="Unrecognized CSV schema")
 
 def build_table_name(schema: str, filename: str) -> str:
@@ -70,18 +73,34 @@ def build_table_name(schema: str, filename: str) -> str:
     return f"{schema}_{name}_{ts}"
 
 def decode_csv_bytes(raw: bytes) -> str:
-    for enc in ("utf-16", "utf-8-sig"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            pass
+    # 1️⃣ UTF-16 (Excel favorite)
+    try:
+        text = raw.decode("utf-16")
+        print("📄 CSV decoded as utf-16")
+        return text
+    except UnicodeDecodeError:
+        pass
+
+    # 2️⃣ UTF-8 with BOM
+    try:
+        text = raw.decode("utf-8-sig")
+        print("📄 CSV decoded as utf-8-sig")
+        return text
+    except UnicodeDecodeError:
+        pass
+
+    # 3️⃣ Charset auto-detection (Latin-1, Windows-1252)
     result = from_bytes(raw).best()
     if result:
+        print(f"📄 CSV decoded as {result.encoding}")
         return str(result)
-    raise HTTPException(status_code=400, detail="Unsupported CSV encoding")
 
-# --- SAFE FIELD HANDLING ---
-MAX_FIELD_BYTES = 100_000
+    raise HTTPException(
+        status_code=400,
+        detail="Unable to decode CSV file (unsupported encoding)"
+    )
+
+MAX_FIELD_BYTES = 100_000  # safely below Postgres COPY limit (131072)
 
 def safe_cell(value: str) -> str:
     if not value:
@@ -91,13 +110,11 @@ def safe_cell(value: str) -> str:
         return value
     return data[:MAX_FIELD_BYTES].decode("utf-8", errors="ignore")
 
-def clean_text(value: str) -> str:
-    # TAB and newline must be removed for TEXT COPY
-    return safe_cell(value).replace("\t", " ").replace("\n", " ").replace("\r", " ")
+
 
 # ================= HEALTH =================
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {"status": "backend running"}
 
@@ -112,10 +129,12 @@ async def upload_csv(file: UploadFile = File(...)):
     cur = conn.cursor()
 
     try:
+        # Read & decode ONCE
         raw = await file.read()
         text = decode_csv_bytes(raw)
-        reader = csv.DictReader(StringIO(text))
+        stream = StringIO(text)
 
+        reader = csv.DictReader(stream)
         if not reader.fieldnames:
             raise HTTPException(status_code=400, detail="Empty CSV")
 
@@ -126,7 +145,7 @@ async def upload_csv(file: UploadFile = File(...)):
         table = build_table_name(schema, file.filename)
 
         if schema == "teacher":
-            cols = TEACHER_COLUMNS
+            copy_cols = TEACHER_COLUMNS
             cur.execute(f'''
                 CREATE TABLE "{table}" (
                     id BIGSERIAL PRIMARY KEY,
@@ -138,7 +157,7 @@ async def upload_csv(file: UploadFile = File(...)):
                 )
             ''')
         else:
-            cols = SCHOOL_COLUMNS
+            copy_cols = SCHOOL_COLUMNS
             cur.execute(f'''
                 CREATE TABLE "{table}" (
                     id BIGSERIAL PRIMARY KEY,
@@ -151,49 +170,55 @@ async def upload_csv(file: UploadFile = File(...)):
                 )
             ''')
 
+        # --- CHUNKED COPY ---
         buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(copy_cols)  # header
+
         BATCH_SIZE = 5000
-        count = 0
-        total = 0
+        row_count = 0
+        total_rows = 0
 
         for row in reader:
-            values = [
-                clean_text((row.get(c) or "").strip())
-                for c in cols
-            ]
-            buffer.write("\t".join(values) + "\n")
-            count += 1
-            total += 1
+            writer.writerow([safe_cell((row.get(c) or "").strip())for c in copy_cols])
 
-            if count >= BATCH_SIZE:
+            row_count += 1
+            total_rows += 1
+
+            if row_count >= BATCH_SIZE:
                 buffer.seek(0)
                 cur.copy_expert(
                     f'''
-                    COPY "{table}" ({",".join(cols)})
-                    FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')
+                    COPY "{table}" ({",".join(copy_cols)})
+                    FROM STDIN WITH CSV
                     ''',
                     buffer
                 )
                 buffer = StringIO()
-                count = 0
+                writer = csv.writer(buffer)
+                row_count = 0
 
-        if count > 0:
+        # Flush remaining rows
+        if row_count > 0:
             buffer.seek(0)
             cur.copy_expert(
                 f'''
-                COPY "{table}" ({",".join(cols)})
-                FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')
+                COPY "{table}" ({",".join(copy_cols)})
+                FROM STDIN WITH CSV
                 ''',
                 buffer
             )
 
-        cur.execute(
-            "INSERT INTO dataset_registry (table_name, dataset_type, row_count) VALUES (%s,%s,%s)",
-            (table, schema, total)
-        )
+        cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+        rows = cur.fetchone()[0]
+
+        cur.execute("""
+            INSERT INTO dataset_registry (table_name, dataset_type, row_count)
+            VALUES (%s, %s, %s)
+        """, (table, schema, rows))
 
         conn.commit()
-        return {"table": table, "type": schema, "rows": total}
+        return {"table": table, "type": schema, "rows": rows}
 
     except Exception as e:
         conn.rollback()
@@ -204,21 +229,33 @@ async def upload_csv(file: UploadFile = File(...)):
         cur.close()
         conn.close()
 
+
 # ================= DATASETS =================
 
 @app.get("/datasets")
 def list_datasets():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
         SELECT table_name, dataset_type, row_count, uploaded_at
         FROM dataset_registry
         ORDER BY uploaded_at DESC
     """)
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [{"table": r[0], "type": r[1], "rows": r[2], "uploaded_at": r[3]} for r in rows]
+
+    return [
+        {
+            "table": r[0],
+            "type": r[1],
+            "rows": r[2],
+            "uploaded_at": r[3],
+        }
+        for r in rows
+    ]
 
 # ================= DELETE =================
 
@@ -229,14 +266,18 @@ class DeletePayload(BaseModel):
 def delete_dataset(payload: DeletePayload):
     if not payload.table.isidentifier():
         raise HTTPException(status_code=400, detail="Invalid table")
+
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(f'DROP TABLE IF EXISTS "{payload.table}"')
-    cur.execute("DELETE FROM dataset_registry WHERE table_name=%s", (payload.table,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"status": "deleted"}
+
+    try:
+        cur.execute(f'DROP TABLE IF EXISTS "{payload.table}"')
+        cur.execute("DELETE FROM dataset_registry WHERE table_name = %s", (payload.table,))
+        conn.commit()
+        return {"status": "deleted"}
+    finally:
+        cur.close()
+        conn.close()
 
 # ================= DOWNLOAD =================
 
@@ -250,15 +291,48 @@ def download(table: str):
 
     def stream():
         buf = StringIO()
-        cur.copy_expert(f'COPY "{table}" TO STDOUT WITH CSV HEADER', buf)
-        buf.seek(0)
-        yield from buf
-        buf.close()
-        cur.close()
-        conn.close()
+        try:
+            cur.copy_expert(f'COPY "{table}" TO STDOUT WITH CSV HEADER', buf)
+            buf.seek(0)
+            while True:
+                chunk = buf.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            buf.close()
+            cur.close()
+            conn.close()
 
     return StreamingResponse(
         stream(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{table}.csv"'}
     )
+
+# ================= SEARCH =================
+
+@app.get("/search")
+def search(table: str, field: str, value: str):
+    if not table.isidentifier():
+        raise HTTPException(status_code=400, detail="Invalid table")
+    if field not in {"school_code", "employee_code"}:
+        raise HTTPException(status_code=400, detail="Invalid field")
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            f'SELECT * FROM "{table}" WHERE "{field}"=%s',
+            (value.strip(),)
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return {"message": "Code not found", "rows": []}
+
+        cols = [d[0] for d in cur.description]
+        return {"rows": [dict(zip(cols, r)) for r in rows]}
+    finally:
+        cur.close()
+        conn.close()
