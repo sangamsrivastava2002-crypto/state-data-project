@@ -67,8 +67,6 @@ def detect_schema(headers: list[str]) -> str:
 
     raise HTTPException(status_code=400, detail="Unrecognized CSV schema")
 
-print("🧠 Normalized headers:", headers)
-
 
 def build_table_name(schema: str, filename: str) -> str:
     name = re.sub(r"[^a-z0-9_]+", "_", filename.lower().replace(".csv", ""))
